@@ -1,0 +1,43 @@
+# Local Postgres + Paperrust built from this tree.
+#
+#   docker compose -f docker-compose.example.yml up --build
+#
+# Then: curl -fsS http://127.0.0.1:8788/health
+# The values below are examples. They are not a production configuration.
+
+services:
+  postgres:
+    image: docker.io/library/postgres:16-bookworm
+    environment:
+      POSTGRES_USER: paperrust
+      POSTGRES_PASSWORD: paperrust
+      POSTGRES_DB: paperrust
+    volumes:
+      # Applied once, on a fresh data directory, in filename order.
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperrust -d paperrust"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  paperrust:
+    build:
+      context: .
+      dockerfile: Containerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8788:8788"
+    environment:
+      DATABASE_URL: postgres://paperrust:paperrust@postgres:5432/paperrust?sslmode=disable
+      SESSION_SECRET: ${SESSION_SECRET:?set a random 32+ char secret}
+      # 64 hex chars, e.g. `openssl rand -hex 32` exported before `docker compose up`.
+      PAPERRUST_LLM_KEY_ENCRYPTION_KEY: ${PAPERRUST_LLM_KEY_ENCRYPTION_KEY:?set PAPERRUST_LLM_KEY_ENCRYPTION_KEY (openssl rand -hex 32)}
+      PAPERRUST_BIND: 0.0.0.0:8788
+      PAPERRUST_BIND_ALLOW_UNSPECIFIED: "1"
+      PAPERRUST_ENV: production
+      PAPERRUST_BOOTSTRAP_EMAIL: admin@example.invalid
+      PAPERRUST_BOOTSTRAP_NAME: Admin
+      PAPERRUST_BOOTSTRAP_SUBJECT: bootstrap:admin

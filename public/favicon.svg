@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="8" fill="#161815"/>
+  <path d="M8 5.5h11.4L23.5 10v16.5H8Z" fill="#f3efe6"/>
+  <path d="M19.4 5.5V10H23.5" fill="#cfc8ba"/>
+  <text x="16" y="21.6" text-anchor="middle" fill="#c45c32" font-family="ui-sans-serif, system-ui, sans-serif" font-size="11" font-weight="700" letter-spacing="-0.04em">Pr</text>
+</svg>

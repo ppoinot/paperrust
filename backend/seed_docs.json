@@ -1,0 +1,431 @@
+[
+  {
+    "title": "Facture électricité — janvier 2026",
+    "correspondent": "Réseau Alpin SA",
+    "type": "Facture",
+    "path": "Énergie/{created_year}",
+    "date": "2026-01-12",
+    "added": "2026-01-14T09:12:00Z",
+    "asn": 1042,
+    "tags": [
+      "Finance",
+      "Logement",
+      "2026"
+    ],
+    "language": "fr",
+    "summary": "Consommation 842 kWh, montant 128,40 CHF.",
+    "filename": "reseau-alpin-2026-01.pdf",
+    "ref": "FA-2026-01128",
+    "stamp": "PAYÉ",
+    "custom": {
+      "Montant": "128.40",
+      "Monnaie": "CHF",
+      "N° de référence": "FA-2026-01128"
+    },
+    "lines": [
+      "Point de livraison  ·  Chemin des Saules 12",
+      "Période du 01.12.2025 au 31.12.2025",
+      "Énergie haute  612 kWh  ×  0,128  =  78,34 CHF",
+      "Énergie basse  230 kWh  ×  0,092  =  21,16 CHF",
+      "Acheminement et taxes                    28,90 CHF",
+      "Total TTC                               128,40 CHF",
+      "Échéance : 02.02.2026   IBAN CH18 0076 0000 0000 1842"
+    ],
+    "content": "Réseau Alpin SA — Facture d'électricité janvier 2026\nPoint de livraison : Chemin des Saules 12\nPériode : 01.12.2025 – 31.12.2025\nConsommation totale : 842 kWh\nÉnergie haute 612 kWh × 0,128 = 78,34 CHF\nÉnergie basse 230 kWh × 0,092 = 21,16 CHF\nAcheminement et taxes 28,90 CHF\nTotal TTC 128,40 CHF\nÉchéance 02.02.2026\nIBAN CH18 0076 0000 0000 1842\nRéférence FA-2026-01128\n"
+  },
+  {
+    "title": "Prime assurance habitation 2026",
+    "correspondent": "Cime Assurance",
+    "type": "Attestation",
+    "path": "Assurances/{created_year}",
+    "date": "2025-12-03",
+    "added": "2025-12-05T16:40:00Z",
+    "asn": 1031,
+    "tags": [
+      "Logement",
+      "Finance",
+      "2025"
+    ],
+    "language": "fr",
+    "summary": "Police HAB-88421, prime annuelle 642 CHF.",
+    "filename": "cime-habitation-2026.pdf",
+    "ref": "HAB-88421",
+    "stamp": "VALABLE",
+    "custom": {
+      "Montant": "642.00",
+      "Monnaie": "CHF",
+      "N° de référence": "HAB-88421"
+    },
+    "lines": [
+      "Police HAB-88421  ·  habitation + RC",
+      "Bâtiment : appartement 4.5 pièces, 72 m²",
+      "Mobilier assuré : 80 000 CHF",
+      "Responsabilité civile : 5 000 000 CHF",
+      "Prime annuelle 2026 : 642,00 CHF",
+      "Échéance de paiement : 01.01.2026",
+      "Franchise : 200 CHF par sinistre"
+    ],
+    "content": "Cime Assurance — Attestation d'assurance habitation\nPolice HAB-88421 habitation + responsabilité civile\nAppartement 4.5 pièces, 72 m²\nMobilier 80 000 CHF · RC 5 000 000 CHF\nPrime annuelle 2026 : 642,00 CHF\nÉchéance 01.01.2026 · franchise 200 CHF\nValable du 01.01.2026 au 31.12.2026\n"
+  },
+  {
+    "title": "Relevé de compte — août 2026",
+    "correspondent": "Banque des Crêtes",
+    "type": "Relevé",
+    "path": "Banque/{created_year}",
+    "date": "2026-08-31",
+    "added": "2026-09-02T07:20:00Z",
+    "asn": 1104,
+    "tags": [
+      "Finance",
+      "2026"
+    ],
+    "language": "fr",
+    "summary": "Solde de clôture 18 420,55 CHF.",
+    "filename": "cretes-releve-2026-08.pdf",
+    "ref": "CPT-441-08",
+    "custom": {
+      "Montant": "18420.55",
+      "Monnaie": "CHF",
+      "N° de référence": "CPT-441-08"
+    },
+    "lines": [
+      "Compte courant CHF  ·  CH29 0076 5000 4410 2001 8",
+      "Solde d'ouverture au 01.08                    17 210,00",
+      "Salaire mensuel                      +  6 420,00",
+      "Loyer Régie du Vallon                −  1 750,00",
+      "Cime Assurance                       −    642,00",
+      "Autres paiements                     −  2 817,45",
+      "Solde au 31.08.2026                     18 420,55 CHF"
+    ],
+    "content": "Banque des Crêtes — Relevé de compte août 2026\nCompte courant CHF CH29 0076 5000 4410 2001 8\nSolde d'ouverture 17 210,00 CHF\nSalaire +6 420,00 · Loyer −1 750,00 · Assurance −642,00\nAutres paiements −2 817,45\nSolde de clôture 18 420,55 CHF au 31.08.2026\nRéférence CPT-441-08\n"
+  },
+  {
+    "title": "Bail à loyer — appartement 4.5 pces",
+    "correspondent": "Régie du Vallon",
+    "type": "Contrat",
+    "path": "Logement/Contrats",
+    "date": "2025-04-15",
+    "added": "2025-04-18T11:00:00Z",
+    "asn": 1008,
+    "tags": [
+      "Logement",
+      "2025"
+    ],
+    "language": "fr",
+    "summary": "Loyer 1 750 CHF + charges 180 CHF.",
+    "filename": "regie-bail-2025.pdf",
+    "ref": "BAIL-19-SAULES",
+    "stamp": "SIGNÉ",
+    "custom": {
+      "Montant": "1750.00",
+      "Monnaie": "CHF",
+      "N° de référence": "BAIL-19-SAULES"
+    },
+    "lines": [
+      "Objet : appartement 4.5 pièces, 72 m²",
+      "Adresse : Chemin des Saules 12, Valombre",
+      "Début du bail : 01.05.2025  ·  durée indéterminée",
+      "Loyer net : 1 750,00 CHF / mois",
+      "Acompte de charges : 180,00 CHF / mois",
+      "Garantie de loyer : 3 mois, compte bloqué",
+      "Résiliation : 3 mois pour le 31 mars / 30 juin / 30 sept. / 31 déc."
+    ],
+    "content": "Régie du Vallon — Contrat de bail à loyer\nAppartement 4.5 pièces, 72 m², Chemin des Saules 12, Valombre\nDébut 01.05.2025, durée indéterminée\nLoyer net 1 750 CHF + charges 180 CHF\nGarantie trois mois\nRésiliation aux termes usuels (3 mois)\nRéférence BAIL-19-SAULES\n"
+  },
+  {
+    "title": "Quittance de loyer — juillet 2026",
+    "correspondent": "Régie du Vallon",
+    "type": "Quittance",
+    "path": "Logement/{created_year}",
+    "date": "2026-07-03",
+    "added": "2026-07-03T18:22:00Z",
+    "asn": 1088,
+    "tags": [
+      "Logement",
+      "Finance",
+      "2026"
+    ],
+    "language": "fr",
+    "summary": "Loyer + charges juillet, 1 930 CHF.",
+    "filename": "regie-quittance-2026-07.pdf",
+    "ref": "Q-2026-07",
+    "stamp": "ENCAISSÉ",
+    "custom": {
+      "Montant": "1930.00",
+      "Monnaie": "CHF",
+      "N° de référence": "Q-2026-07"
+    },
+    "lines": [
+      "Période : juillet 2026",
+      "Loyer net                                      1 750,00",
+      "Acompte de charges                               180,00",
+      "Total encaissé                                 1 930,00 CHF",
+      "Reçu le 03.07.2026 par virement",
+      "Nous vous remercions de votre ponctualité."
+    ],
+    "content": "Régie du Vallon — Quittance de loyer juillet 2026\nLoyer net 1 750,00 + charges 180,00 = 1 930,00 CHF\nEncaissé le 03.07.2026 par virement\nRéférence Q-2026-07\n"
+  },
+  {
+    "title": "Consultation — Cabinet du Léman",
+    "correspondent": "Cabinet du Léman",
+    "type": "Facture",
+    "path": "Santé/{created_year}",
+    "date": "2026-06-11",
+    "added": "2026-06-12T08:45:00Z",
+    "asn": 1076,
+    "tags": [
+      "Santé",
+      "Finance",
+      "2026"
+    ],
+    "language": "fr",
+    "summary": "Consultation + analyses, 246 CHF.",
+    "filename": "leman-consult-2026-06.pdf",
+    "ref": "TARMED-44621",
+    "custom": {
+      "Montant": "246.00",
+      "Monnaie": "CHF",
+      "N° de référence": "TARMED-44621"
+    },
+    "lines": [
+      "Consultation du 11.06.2026, Dr A. Morel",
+      "Consultation générale (TARMED)                 132,00",
+      "Prélèvement sanguin                             28,00",
+      "Analyses laboratoire                            86,00",
+      "Total                                          246,00 CHF",
+      "À transmettre à votre assurance de base."
+    ],
+    "content": "Cabinet du Léman — Facture de consultation\nDr A. Morel, 11 juin 2026\nConsultation TARMED 132 CHF · prélèvement 28 CHF · analyses 86 CHF\nTotal 246,00 CHF\nRéférence TARMED-44621\nÀ transmettre à l'assurance de base.\n"
+  },
+  {
+    "title": "Ordonnance — suivi annuel",
+    "correspondent": "Cabinet du Léman",
+    "type": "Ordonnance",
+    "path": "Santé/{created_year}",
+    "date": "2026-06-11",
+    "added": "2026-06-11T15:10:00Z",
+    "asn": 1075,
+    "tags": [
+      "Santé",
+      "2026"
+    ],
+    "language": "fr",
+    "summary": "Renouvellement traitement, 3 mois.",
+    "filename": "leman-ordo-2026-06.pdf",
+    "ref": "RX-1106",
+    "stamp": "MÉDECIN",
+    "lines": [
+      "Patient : dossier interne 8841",
+      "1. Lévothyroxine 75 µg    1-0-0    3 mois",
+      "2. Vitamine D 2000 UI     1-0-0    3 mois",
+      "Renouvelable une fois.",
+      "Dr A. Morel  ·  Cabinet du Léman"
+    ],
+    "content": "Cabinet du Léman — Ordonnance du 11.06.2026\nLévothyroxine 75 µg 1-0-0 pour 3 mois\nVitamine D 2000 UI 1-0-0 pour 3 mois\nRenouvelable une fois\nDr A. Morel\nRéférence RX-1106\n"
+  },
+  {
+    "title": "Facture fibre — Alpenet",
+    "correspondent": "Alpenet SA",
+    "type": "Facture",
+    "path": "Énergie/{created_year}",
+    "date": "2026-08-01",
+    "added": "2026-08-02T10:05:00Z",
+    "asn": 1096,
+    "tags": [
+      "Finance",
+      "Logement",
+      "2026"
+    ],
+    "language": "fr",
+    "summary": "Abonnement fibre 1 Gbit, 69 CHF.",
+    "filename": "alpenet-2026-08.pdf",
+    "ref": "ALP-88021",
+    "stamp": "PRÉLÈV.",
+    "custom": {
+      "Montant": "69.00",
+      "Monnaie": "CHF",
+      "N° de référence": "ALP-88021"
+    },
+    "lines": [
+      "Offre Fibre 1 Gbit/s  ·  ligne 021 555 18 42",
+      "Abonnement du 01.08 au 31.08.2026               59,00",
+      "Box Wi-Fi 6 (location)                          10,00",
+      "Total TTC                                      69,00 CHF",
+      "Prélèvement le 05.08.2026"
+    ],
+    "content": "Alpenet SA — Facture août 2026\nFibre 1 Gbit/s, ligne 021 555 18 42\nAbonnement 59 CHF + box 10 CHF = 69,00 CHF\nPrélèvement 05.08.2026\nRéférence ALP-88021\n"
+  },
+  {
+    "title": "Attestation fiscale 2025",
+    "correspondent": "Commune de Valombre",
+    "type": "Attestation",
+    "path": "Impôts/{created_year}",
+    "date": "2026-03-20",
+    "added": "2026-03-22T13:30:00Z",
+    "asn": 1055,
+    "tags": [
+      "Impôts",
+      "2026",
+      "2025"
+    ],
+    "language": "fr",
+    "summary": "Certificat de revenus pour la déclaration.",
+    "filename": "valombre-impots-2025.pdf",
+    "ref": "IFD-2025-441",
+    "stamp": "OFFICIEL",
+    "custom": {
+      "N° de référence": "IFD-2025-441"
+    },
+    "lines": [
+      "Année fiscale 2025",
+      "Revenu déterminant                            98 400 CHF",
+      "Fortune nette                                 42 100 CHF",
+      "Impôt cantonal et communal                    11 280 CHF",
+      "Impôt fédéral direct                           1 940 CHF",
+      "Cette attestation sert à la déclaration 2025."
+    ],
+    "content": "Commune de Valombre — Attestation fiscale 2025\nRevenu déterminant 98 400 CHF\nFortune nette 42 100 CHF\nICC 11 280 CHF · IFD 1 940 CHF\nRéférence IFD-2025-441\nPour la déclaration d'impôt 2025.\n"
+  },
+  {
+    "title": "Garantie — four encastrable",
+    "correspondent": "Atelier Nordlicht",
+    "type": "Garantie",
+    "path": "Garanties",
+    "date": "2025-11-08",
+    "added": "2025-11-09T17:00:00Z",
+    "asn": 1024,
+    "tags": [
+      "Garantie",
+      "Logement",
+      "2025"
+    ],
+    "language": "fr",
+    "summary": "Garantie 24 mois, n° de série NX-4421.",
+    "filename": "nordlicht-garantie.pdf",
+    "ref": "SN-NX-4421",
+    "stamp": "24 MOIS",
+    "custom": {
+      "N° de référence": "SN-NX-4421"
+    },
+    "lines": [
+      "Appareil : four encastrable Pyro 60",
+      "N° de série : NX-4421",
+      "Date d'achat : 08.11.2025",
+      "Garantie constructeur : 24 mois pièces et main-d'œuvre",
+      "Extension possible 36 mois jusqu'au 08.12.2025",
+      "SAV : sav@nordlicht.example"
+    ],
+    "content": "Atelier Nordlicht — Certificat de garantie\nFour encastrable Pyro 60, n° de série NX-4421\nAchat 08.11.2025\nGarantie 24 mois pièces et main-d'œuvre\nExtension 36 mois possible jusqu'au 08.12.2025\nSAV sav@nordlicht.example\n"
+  },
+  {
+    "title": "Courrier — ouverture de succession",
+    "correspondent": "Étude Perret & Associés",
+    "type": "Courrier",
+    "path": "Courrier/{created_year}",
+    "date": "2026-02-18",
+    "added": "2026-02-20T09:40:00Z",
+    "asn": 1048,
+    "tags": [
+      "2026"
+    ],
+    "language": "fr",
+    "summary": "Convocation étude, 4 mars 2026.",
+    "filename": "perret-succession.pdf",
+    "ref": "DOS-2026-118",
+    "lines": [
+      "Nous vous informons de l'ouverture du dossier",
+      "de succession n° 2026-118.",
+      "Une réunion d'information se tiendra le",
+      "mercredi 4 mars 2026 à 14h30 en nos locaux,",
+      "rue du Marché 8, 1800 Vevey.",
+      "Merci d'apporter une pièce d'identité."
+    ],
+    "content": "Étude Perret & Associés — Courrier du 18.02.2026\nOuverture de succession dossier 2026-118\nRéunion le mercredi 4 mars 2026 à 14h30\nRue du Marché 8, 1800 Vevey\nPièce d'identité requise\nRéférence DOS-2026-118\n"
+  },
+  {
+    "title": "Entretien véhicule — facture garage",
+    "correspondent": "Garage des Cèdres",
+    "type": "Facture",
+    "path": "Véhicule/{created_year}",
+    "date": "2026-05-22",
+    "added": "2026-05-22T16:18:00Z",
+    "asn": 1068,
+    "tags": [
+      "Finance",
+      "2026"
+    ],
+    "language": "fr",
+    "summary": "Révision 40 000 km, 612,50 CHF.",
+    "filename": "cedres-revision-2026.pdf",
+    "ref": "GV-8842",
+    "stamp": "RÉGLÉ",
+    "custom": {
+      "Montant": "612.50",
+      "Monnaie": "CHF",
+      "N° de référence": "GV-8842"
+    },
+    "lines": [
+      "Véhicule : break, 40 120 km",
+      "Révision constructeur 40 000 km                 420,00",
+      "Plaquettes avant                                 148,00",
+      "Huile 0W-30 5 L                                   44,50",
+      "Total TTC                                       612,50 CHF",
+      "Prochain entretien : 60 000 km ou 05.2027"
+    ],
+    "content": "Garage des Cèdres — Facture révision 22.05.2026\nBreak, 40 120 km\nRévision 420 CHF · plaquettes 148 CHF · huile 44,50 CHF\nTotal 612,50 CHF\nProchain entretien 60 000 km ou mai 2027\nRéférence GV-8842\n"
+  },
+  {
+    "title": "Ticket — Café des Archives",
+    "correspondent": "Café des Archives",
+    "type": "Quittance",
+    "path": "Divers/{created_year}",
+    "date": "2026-09-01",
+    "added": "2026-09-01T19:12:00Z",
+    "asn": 1108,
+    "tags": [
+      "Inbox",
+      "2026"
+    ],
+    "language": "fr",
+    "summary": "Repas du 1er septembre, 24,50 CHF.",
+    "filename": "archives-ticket-0901.jpg",
+    "ref": "T-90441",
+    "custom": {
+      "Montant": "24.50",
+      "Monnaie": "CHF"
+    },
+    "lines": [
+      "1 espresso                                   4,50",
+      "1 plat du jour                              18,00",
+      "1 eau                                        2,00",
+      "Total TTC                                   24,50 CHF",
+      "Merci, à bientôt."
+    ],
+    "content": "Café des Archives — ticket 01.09.2026\nEspresso 4,50 · plat du jour 18,00 · eau 2,00\nTotal 24,50 CHF\nTicket T-90441\n"
+  },
+  {
+    "title": "Scan non classé — notice technique",
+    "correspondent": "Atelier Nordlicht",
+    "type": "Garantie",
+    "path": "Garanties",
+    "date": "2026-09-02",
+    "added": "2026-09-02T21:04:00Z",
+    "asn": 1109,
+    "tags": [
+      "Inbox",
+      "Garantie"
+    ],
+    "language": "fr",
+    "summary": "Notice four Pyro 60, à classer.",
+    "filename": "scan-notice-pyro.pdf",
+    "lines": [
+      "Four Pyro 60 — notice d'installation",
+      "Alimentation 230 V · 16 A dédié",
+      "Niche 600 × 600 × 560 mm",
+      "Pyrolyse : retirer les grilles, cycle 2 h",
+      "Ne jamais utiliser de spray four.",
+      "À classer avec le certificat de garantie."
+    ],
+    "content": "Atelier Nordlicht — Notice technique four Pyro 60\nAlimentation 230 V 16 A\nNiche 600 × 600 × 560 mm\nCycle pyrolyse 2 heures, retirer les grilles\nNe pas utiliser de spray four\nDocument à classer avec la garantie NX-4421\n"
+  }
+]

@@ -1,0 +1,64 @@
+Paperrust is licensed under AGPL-3.0-or-later. See LICENSE.
+
+This file records third-party components that Paperrust distributes or links,
+and the license terms that apply to them. Those terms are unchanged by the
+Paperrust license.
+
+pdf.js
+------
+
+The in-browser PDF viewer uses pdf.js (Mozilla), packaged as pdfjs-dist.
+
+  License: Apache License, Version 2.0 (Apache-2.0)
+  https://www.apache.org/licenses/LICENSE-2.0
+
+Adobe CMap resources
+--------------------
+
+Character-map resources used by pdf.js are under public/pdfjs/cmaps/.
+
+  Copyright 1990-2009 Adobe Systems Incorporated. All rights reserved.
+  License text: public/pdfjs/cmaps/LICENSE
+
+Redistribution in source or binary form must keep that copyright notice,
+the conditions, and the disclaimer.
+
+Liberation fonts
+----------------
+
+Standard font files used by pdf.js:
+
+  public/pdfjs/standard_fonts/LiberationSans-Regular.ttf
+  public/pdfjs/standard_fonts/LiberationSans-Bold.ttf
+  public/pdfjs/standard_fonts/LiberationSans-Italic.ttf
+  public/pdfjs/standard_fonts/LiberationSans-BoldItalic.ttf
+
+  Digitized data copyright (c) 2010 Google Corporation
+      with Reserved Font Arimo, Tinos and Cousine.
+  Copyright (c) 2012 Red Hat, Inc.
+      with Reserved Font Name Liberation.
+
+  License: SIL Open Font License, Version 1.1 (OFL)
+  License text: public/pdfjs/standard_fonts/LICENSE_LIBERATION
+  https://scripts.sil.org/OFL
+
+The fonts, including derivative works, stay under the OFL. Reserved font
+names may not be used for derivative fonts without permission. This
+requirement does not apply to documents created with the fonts.
+
+PDFium
+------
+
+Server-side PDF page rasterization uses PDFium through the pdfium-render
+crate and libpdfium.
+
+  Copyright 2014 PDFium Authors. All rights reserved.
+  License: BSD-style terms (redistribution in source and binary form with
+  retention of the copyright notice, conditions, and disclaimer; no
+  endorsement using the name of Google Inc. or its contributors).
+
+The Foxit standard font files shipped for pdf.js under
+public/pdfjs/standard_fonts/ (FoxitFixed, FoxitSerif, FoxitSymbol,
+FoxitDingbats, and their bold and italic variants) are covered by the same
+PDFium Authors terms. License text:
+public/pdfjs/standard_fonts/LICENSE_FOXIT
