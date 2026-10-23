@@ -10,7 +10,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 
@@ -221,7 +221,7 @@ fn encrypt(plain: &str, user_id: i32, provider: &str) -> anyhow::Result<Vec<u8>>
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| anyhow::anyhow!("aes key: {e}"))?;
     let mut nonce_bytes = [0u8; V2_NONCE_LEN];
-    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
     let nonce = Nonce::from_slice(&nonce_bytes);
     let aad = aad_bytes(user_id, provider);
     let ct = cipher

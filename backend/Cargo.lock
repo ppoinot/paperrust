@@ -1666,6 +1666,7 @@ dependencies = [
  "image",
  "jsonwebtoken",
  "pdfium-render",
+ "rand 0.10.2",
  "rand 0.8.8",
  "regex",
  "reqwest",

@@ -470,7 +470,7 @@ fn test_rsa() -> &'static TestRsa {
         use rsa::pkcs1::EncodeRsaPrivateKey;
         use rsa::traits::PublicKeyParts;
         use rsa::RsaPrivateKey;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand08::thread_rng();
         let key = RsaPrivateKey::new(&mut rng, 2048).expect("generate rsa");
         let pem = key
             .to_pkcs1_pem(rsa::pkcs8::LineEnding::LF)

@@ -22,10 +22,12 @@ uuid = { version = "1.26.0", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "tiff", "webp"] }
 pdfium-render = "0.8"
 sha2 = "0.10"
-rand = "0.8"
+rand = "0.10"
 aes-gcm = "0.10"
 url = "2"
 jsonwebtoken = { version = "10.3", default-features = true, features = ["rust_crypto"] }
 
 [dev-dependencies]
 rsa = { version = "0.9.10", features = ["pem", "std"] }
+# rsa 0.9 still uses rand_core 0.6. Production code uses rand 0.10.
+rand08 = { package = "rand", version = "0.8.8" }
