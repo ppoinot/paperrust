@@ -2063,11 +2063,11 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "reqwest"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
+checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "futures-core",
  "futures-util",
@@ -2347,9 +2347,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
  "itoa",
  "memchr",
@@ -3146,9 +3146,9 @@ checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
 name = "uuid"
-version = "1.26.0"
+version = "1.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5772d71c9be8a8a6ac2117d949c5b224c1b72241bb611d9a3012edcf8af7812"
+checksum = "7cc1186384beb7dd8eedea376413fd654937285ea6c9cfbb928dc3043ea4b606"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
