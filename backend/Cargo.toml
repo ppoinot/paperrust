@@ -7,7 +7,7 @@ license = "AGPL-3.0-or-later"
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["multipart"] }
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4.45", features = ["serde"] }
 regex = "1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "form", "rustls", "multipart"] }
