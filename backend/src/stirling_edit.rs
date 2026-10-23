@@ -24,7 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, body::Body};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::RngCore;
+use rand::Rng;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -444,7 +444,7 @@ pub fn verify_edit_token(token: &str, op: TokenOp, now: u64) -> Option<EditClaim
 
 fn new_sid() -> String {
     let mut buf = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut buf);
+    rand::rng().fill_bytes(&mut buf);
     URL_SAFE_NO_PAD.encode(buf)
 }
 

@@ -6,7 +6,7 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -65,7 +65,7 @@ fn hash_token(raw: &str) -> String {
 
 fn mint_raw_token() -> (String, String, String) {
     let mut bytes = [0u8; TOKEN_BYTES];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     let raw = format!("{TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes));
     let prefix: String = raw.chars().take(PREFIX_CHARS).collect();
     let hash = hash_token(&raw);
