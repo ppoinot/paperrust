@@ -6,20 +6,49 @@ The interface is in French.
 
 ## Features
 
+The browser app can be installed (web app manifest, service worker that does not cache requests).
+
+### Archive
+
 - Dashboard with upload, counts, and monthly intake
-- Document library, search, inbox, and trash with a retention delay
-- In-browser PDF viewing, plus server-side page previews
-- Optical character recognition through a language-model provider you configure
+- Document library, full-text search, inbox, and trash with a retention delay
+- In-browser PDF viewing with a selectable text layer, and server-side page previews
+- Notes on each document
 - Correspondents, tags, document types, custom fields, and storage paths
-- Saved views and workflows that apply tags from document content
-- Optional import from a Paperless-ngx instance
-- Optional hand-off to Stirling-PDF for editing
-- OpenID Connect sign-in, and API tokens for ingestion or read-only access
-- Queued uploads, one file at a time, with a 100 MB cap and a content-hash skip for duplicates
-- Optional MCP connector (public OAuth client) to search, read, and upload documents
+- Saved views, and workflows that apply tags from document content
 - Activity log
 
-Machine clients and the optional MCP connector are documented in [docs/bot-access.md](docs/bot-access.md). An iOS Shortcut for ingest is in [docs/ios-shortcut.md](docs/ios-shortcut.md). The Paperless-ngx compatible upload is in [docs/quickscan-ngx.md](docs/quickscan-ngx.md).
+### Upload and text recognition
+
+- Drop many files. They queue and upload one at a time, under a 100 MB request cap
+- SHA-256 duplicate skip. A file already in the archive is not stored again. A copy that only exists in the trash does not count
+- Optical character recognition through a language-model provider you configure
+
+### Edit and bring documents in
+
+- Optional hand-off to Stirling-PDF. The editor tab opens on the editor origin only
+- Optional import from a Paperless-ngx instance
+- Paperless-ngx compatible upload, `POST /api/documents/post_document/` ([docs/quickscan-ngx.md](docs/quickscan-ngx.md))
+- iOS Shortcut ingest, `POST /api/v1/ingest` ([docs/ios-shortcut.md](docs/ios-shortcut.md))
+
+### Sign-in and API tokens
+
+People sign in with OpenID Connect. Machines use a `pr_…` token, shown once and stored as a SHA-256. Scopes do not imply each other:
+
+- `ingest` deposits a file
+- `documents:read` searches and reads that account's documents, including the original file
+- `documents:meta` changes the title, correspondent, type, tags, date, storage path, and custom fields
+- `diagnostics:read` reads recent consume jobs and a redacted process log
+
+Calls, page size, and rate limits are in [docs/bot-access.md](docs/bot-access.md).
+
+### MCP connector
+
+Optional. A public OAuth client (PKCE, empty client secret) at `{origin}/api/mcp`. Set `PAPERRUST_PUBLIC_URL`, or the first `https` origin in `PAPERRUST_PUBLIC_URLS`, and set both `PAPERRUST_MCP_BEARER` and `PAPERRUST_MCP_API_TOKEN`. Discovery responds 404 until an origin is set.
+
+Tools follow the token's scopes: `whoami`, `search_documents`, `get_document`, `get_page_text`, `get_file` (original bytes, base64, windows of at most 256 KiB), `upload_file` (PDF, PNG, or JPEG, at most 8 MiB), `set_labels`, `consumption_journal`, and `diagnostics`.
+
+Allowed redirects are the Grok and Cursor connector callbacks, and HTTP loopback `/callback`. The setup table is in [docs/bot-access.md](docs/bot-access.md).
 
 ## Install
 
