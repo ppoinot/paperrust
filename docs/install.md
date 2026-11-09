@@ -1,6 +1,6 @@
 # Install
 
-Paperrust runs as one application process in front of PostgreSQL. Docker Compose is the supported way to start both.
+Paperrust runs as one application process in front of [pgrust](https://github.com/malisper/pgrust). Docker Compose is the supported way to start both. The example pins pgrust v0.4-beta, the current latest release. pgrust speaks the PostgreSQL wire protocol. The Docker Hub tag `latest` still points at v0.3, so the example does not use it.
 
 ## Requirements
 
@@ -30,7 +30,7 @@ Set at least:
 
 | Variable | Role |
 | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string for the archive. Use a strong password you generate; do not reuse a sample value |
+| `DATABASE_URL` | libpq connection string for the pgrust database. Use a strong password you generate; do not reuse a sample value |
 | `SESSION_SECRET` | Signs the session cookie. Set to a unique value such as `<generate: openssl rand -hex 32>` (at least 32 bytes of randomness) |
 | `PAPERRUST_OIDC_ISSUER` | Issuer URL of the OpenID Connect provider |
 | `PAPERRUST_OIDC_CLIENT_ID` | Client id registered at that provider |
@@ -56,7 +56,7 @@ From the repository root:
 docker compose -f docker-compose.example.yml up --build
 ```
 
-The example Compose file builds Paperrust from this tree and starts PostgreSQL. The first build compiles the API and the web interface.
+The example Compose file builds Paperrust from this tree and starts pgrust v0.4-beta. The first build compiles the API and the web interface. Migrations in `migrations/*.sql` run once, on an empty data volume. The database port is not published.
 
 ## Check
 
