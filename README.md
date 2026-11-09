@@ -1,6 +1,6 @@
 # Paperrust
 
-Paperrust is a self-hosted document archive. You upload originals, read them in the browser, and keep correspondents, tags, types, and custom fields on each document. A Rust API stores the archive in PostgreSQL and serves the web interface from the same process.
+Paperrust is a self-hosted document archive. You upload originals, read them in the browser, and keep correspondents, tags, types, and custom fields on each document. A Rust API stores the archive in [pgrust](https://github.com/malisper/pgrust) and serves the web interface from the same process.
 
 The interface is in French.
 
@@ -52,14 +52,14 @@ Allowed redirects are the Grok and Cursor connector callbacks, and HTTP loopback
 
 ## Install
 
-Docker Compose is the supported install. It builds Paperrust from this repository and starts PostgreSQL.
+Docker Compose is the supported install. It builds Paperrust from this repository and starts pgrust.
 
 ```bash
 cp .env.example .env
 docker compose -f docker-compose.example.yml up --build
 ```
 
-Edit `.env` before the first start. Do not commit it. Generate every secret with a command such as `openssl rand -hex 32`; do not reuse sample passwords. When the containers are up, `GET /health` on the published application port returns HTTP 200. The example file publishes that port on the loopback address.
+Edit `.env` before the first start. Do not commit it. Generate every secret with a command such as `openssl rand -hex 32`; do not reuse sample passwords. When the containers are up, `GET /health` on port 8788 returns HTTP 200. The example publishes the application on that port. It does not publish the database.
 
 Serve the archive over **HTTPS** behind an **OpenID Connect** identity provider. Do not disable OpenID Connect for testing on a shared or exposed host.
 
@@ -71,7 +71,7 @@ Paperrust reads configuration from environment variables. Names, comments, and w
 
 The groups you will set:
 
-- **Database.** `DATABASE_URL` (use a generated password, not a sample)
+- **Database.** `DATABASE_URL`, a libpq URL for pgrust (use a generated password, not a sample)
 - **HTTP.** `PAPERRUST_BIND`, `PAPERRUST_ENV`, `PAPERRUST_PUBLIC_URLS` (HTTPS origins), `PAPERRUST_CORS_ORIGINS`
 - **Sign-in.** `SESSION_SECRET` set to `<generate: openssl rand -hex 32>`, plus `PAPERRUST_OIDC_ISSUER`, `PAPERRUST_OIDC_CLIENT_ID`, `PAPERRUST_OIDC_CLIENT_SECRET`
 - **Optional integrations.** Stirling-PDF URLs, a Paperless-ngx host allowlist, a self-hosted OCR host allowlist, and provider credentials for OCR
@@ -80,11 +80,13 @@ Leave an optional URL empty to keep that integration off. Do not put secrets in 
 
 `PAPERRUST_DEV=1` is a local-only switch. Do not set it when `PAPERRUST_ENV=production`.
 
-## pgrust (alternative to PostgreSQL)
+## Database
 
-[pgrust](https://github.com/malisper/pgrust) is a PostgreSQL-compatible database server written in Rust. You can use it in place of PostgreSQL for local development and testing. The supported install above still uses PostgreSQL.
+The supported database is [pgrust](https://github.com/malisper/pgrust) **v0.4-beta**, the current latest release. It speaks the PostgreSQL wire protocol, so `DATABASE_URL` stays a `postgres://` URL. The Docker Hub tag `latest` still points at v0.3. The example Compose file pins `docker.io/malisper/pgrust:v0.4-beta` instead of that tag.
 
-`scripts/start-pgrust.sh` starts a local pgrust server:
+Compose applies `migrations/*.sql` once, when the data volume is empty. The database port is not published.
+
+`scripts/start-pgrust.sh` starts the same release without Docker, on a single-user machine:
 
 ```bash
 scripts/start-pgrust.sh
@@ -92,18 +94,18 @@ scripts/start-pgrust.sh
 
 The script:
 
-- needs the PostgreSQL 18 tools (`initdb`, `psql`) installed
-- downloads the official pgrust v0.3 Linux x86_64 binary to `bin/pgrust` and checks its SHA-256 against a pinned value
+- downloads the official pgrust v0.4-beta Linux x86_64 tarball into `bin/pgrust-0.4-beta-linux-x86_64/` and checks its SHA-256 against a pinned value
+- uses the `postgres`, `initdb`, and `psql` shipped in that tarball
 - creates a data directory in `pgrust-data/` on first run
 - starts pgrust on `127.0.0.1`, port `5433` by default (set `PGRUST_PORT` to change it), with its log in `pgrust.log`
-- checks that the server reports pgrust 0.3, creates the `paperrust` database if needed, and applies `migrations/0002_paperrust.sql`
+- checks that the server reports `pgrust 0.4-beta`, creates the `paperrust` database if needed, and applies each pending file in `migrations/`
 - prints the connection string to use:
 
 ```
 DATABASE_URL=postgres://postgres@127.0.0.1:5433/paperrust?sslmode=disable
 ```
 
-Export that `DATABASE_URL` before starting the API. This server listens on the loopback address only, with no password: any user or process on this machine can connect to it as the `postgres` superuser. Use it only on a single-user development machine; do not expose it or use it for a production archive.
+Export that `DATABASE_URL` before starting the API on the host. This server listens on the loopback address only, with no password: any user or process on this machine can connect to it as the `postgres` superuser. Do not expose it.
 
 ## License
 

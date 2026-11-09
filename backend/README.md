@@ -8,7 +8,7 @@ Rust service (`paperrust-api`). Build with `cargo build --release` from this dir
 cargo test --locked
 ```
 
-`DATABASE_URL` is required to run the server and is not committed. Tests that do not open Postgres do not need it.
+`DATABASE_URL` is required to run the server and is not committed. It is a libpq URL for pgrust. Tests that do not open a database do not need it.
 
 ## Listen address
 

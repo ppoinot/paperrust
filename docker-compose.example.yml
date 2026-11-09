@@ -1,22 +1,27 @@
-# Local Postgres + Paperrust built from this tree.
+# Local pgrust + Paperrust built from this tree.
 #
 #   docker compose -f docker-compose.example.yml up --build
 #
 # Then: curl -fsS http://127.0.0.1:8788/health
 # The values below are examples. They are not a production configuration.
+#
+# pgrust v0.4-beta is the current latest release. It speaks the PostgreSQL
+# wire protocol. The Docker Hub tag "latest" still points at v0.3, so this
+# file pins v0.4-beta. Migrations run once, on a fresh data volume.
 
 services:
-  postgres:
-    image: docker.io/library/postgres:16-bookworm
+  pgrust:
+    image: docker.io/malisper/pgrust:v0.4-beta
     environment:
       POSTGRES_USER: paperrust
       POSTGRES_PASSWORD: paperrust
       POSTGRES_DB: paperrust
     volumes:
-      # Applied once, on a fresh data directory, in filename order.
+      - pgrust-data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U paperrust -d paperrust"]
+      # TCP, not the socket: the entrypoint's temporary init server is socket-only.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U paperrust -d paperrust"]
       interval: 2s
       timeout: 5s
       retries: 30
@@ -26,12 +31,12 @@ services:
       context: .
       dockerfile: Containerfile
     depends_on:
-      postgres:
+      pgrust:
         condition: service_healthy
     ports:
       - "8788:8788"
     environment:
-      DATABASE_URL: postgres://paperrust:paperrust@postgres:5432/paperrust?sslmode=disable
+      DATABASE_URL: postgres://paperrust:paperrust@pgrust:5432/paperrust?sslmode=disable
       SESSION_SECRET: ${SESSION_SECRET:?set a random 32+ char secret}
       # 64 hex chars, e.g. `openssl rand -hex 32` exported before `docker compose up`.
       PAPERRUST_LLM_KEY_ENCRYPTION_KEY: ${PAPERRUST_LLM_KEY_ENCRYPTION_KEY:?set PAPERRUST_LLM_KEY_ENCRYPTION_KEY (openssl rand -hex 32)}
@@ -41,3 +46,6 @@ services:
       PAPERRUST_BOOTSTRAP_EMAIL: admin@example.invalid
       PAPERRUST_BOOTSTRAP_NAME: Admin
       PAPERRUST_BOOTSTRAP_SUBJECT: bootstrap:admin
+
+volumes:
+  pgrust-data:

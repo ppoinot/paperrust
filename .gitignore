@@ -19,6 +19,7 @@ media/
 
 bin/pgrust
 bin/pgrust.sha256
+bin/pgrust-*/
 
 lib/libpdfium.so
 lib/*.tgz
