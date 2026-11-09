@@ -14,8 +14,12 @@ The interface is in French.
 - Saved views and workflows that apply tags from document content
 - Optional import from a Paperless-ngx instance
 - Optional hand-off to Stirling-PDF for editing
-- OpenID Connect sign-in, and API tokens for ingestion
+- OpenID Connect sign-in, and API tokens for ingestion or read-only access
+- Queued uploads, one file at a time, with a 100 MB cap and a content-hash skip for duplicates
+- Optional MCP connector (public OAuth client) to search, read, and upload documents
 - Activity log
+
+Machine clients and the optional MCP connector are documented in [docs/bot-access.md](docs/bot-access.md). An iOS Shortcut for ingest is in [docs/ios-shortcut.md](docs/ios-shortcut.md). The Paperless-ngx compatible upload is in [docs/quickscan-ngx.md](docs/quickscan-ngx.md).
 
 ## Install
 

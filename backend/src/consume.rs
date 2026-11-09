@@ -10,13 +10,107 @@ use crate::paper::{render_paper_svg, PaperSpec};
 use crate::queries::{allocate_asn, list_correspondents, list_paths, list_tags, list_types, log_audit};
 
 /// Hard cap for document upload / consume (multipart or base64).
-/// Single source: [`crate::limits::MAX_UPLOAD_BYTES`] (/48).
+/// Single source: [`crate::limits::MAX_UPLOAD_BYTES`] (SYN-47/48).
 pub const MAX_UPLOAD_BYTES: usize = crate::limits::MAX_UPLOAD_BYTES;
 
 /// Skip embedding `file_data` data-URLs above this size (raw stays in `original_bytes`).
 const MAX_EMBED_FILE_DATA: usize = 2 * 1024 * 1024;
 
-/// Opaque OCR failure codes for clients / job summary ().
+const CHECKSUM_PREFIX: &str = "sha256:";
+
+/// Content identity stored in `documents.checksum`. Legacy rows used `sha-{asn}-{len}`.
+pub fn content_checksum(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(CHECKSUM_PREFIX.len() + digest.len() * 2);
+    out.push_str(CHECKSUM_PREFIX);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in digest {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// `sha256:` plus 64 hex digits. Rejects anything else.
+pub fn checksum_from_sha256_hex(hex: &str) -> Option<String> {
+    let hex = hex.trim();
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("{CHECKSUM_PREFIX}{}", hex.to_ascii_lowercase()))
+}
+
+pub async fn find_active_document_by_checksum(
+    pool: &PgPool,
+    owner_id: i32,
+    checksum: &str,
+) -> anyhow::Result<Option<i32>> {
+    let id: Option<i32> = sqlx::query_scalar(
+        r#"select id from documents
+           where owner_id = $1 and checksum = $2 and deleted_at is null
+           order by id
+           limit 1"#,
+    )
+    .bind(owner_id)
+    .bind(checksum)
+    .fetch_optional(pool)
+    .await?;
+    Ok(id)
+}
+
+pub async fn ensure_checksum_index(pool: &PgPool) -> anyhow::Result<()> {
+    sqlx::query(
+        "create index if not exists documents_owner_checksum_idx on documents (owner_id, checksum)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Rewrite legacy `sha-{asn}-{len}` checksums from `original_bytes`, one document at a time.
+pub async fn backfill_content_checksums(pool: &PgPool) -> anyhow::Result<u32> {
+    let mut updated = 0u32;
+    loop {
+        let row = sqlx::query(
+            r#"select id, original_bytes from documents
+               where deleted_at is null
+                 and original_bytes is not null
+                 and octet_length(original_bytes) > 0
+                 and (checksum is null or checksum not like 'sha256:%')
+               order by id
+               limit 1"#,
+        )
+        .fetch_optional(pool)
+        .await?;
+        let Some(row) = row else {
+            break;
+        };
+        let id: i32 = row.get("id");
+        let bytes: Vec<u8> = row.get("original_bytes");
+        let sum = content_checksum(&bytes);
+        let res = sqlx::query(
+            r#"update documents set checksum = $1
+               where id = $2
+                 and (checksum is null or checksum not like 'sha256:%')"#,
+        )
+        .bind(&sum)
+        .bind(id)
+        .execute(pool)
+        .await?;
+        if res.rows_affected() == 0 {
+            continue;
+        }
+        updated = updated.saturating_add(1);
+        if updated % 25 == 0 {
+            tracing::info!("checksum backfill: {updated} document(s)");
+        }
+        tokio::task::yield_now().await;
+    }
+    Ok(updated)
+}
+
+/// Opaque OCR failure codes for clients / job summary (SYN-54).
 /// Never forward raw provider body snippets — classify only.
 fn opaque_ocr_provider_error(err: &anyhow::Error) -> &'static str {
     let lower = err.to_string().to_ascii_lowercase();
@@ -41,7 +135,7 @@ fn opaque_ocr_provider_error(err: &anyhow::Error) -> &'static str {
     "ocr_provider_error"
 }
 
-/// only xai|openai|anthropic|selfhosted may drive OCR.
+/// SYN-72: only xai|openai|anthropic|selfhosted may drive OCR.
 fn require_consume_provider(raw: &str) -> anyhow::Result<&'static str> {
     crate::llm_keys::normalize_consume_provider(raw).ok_or_else(|| {
         anyhow::anyhow!("unsupported_ocr_provider")
@@ -257,7 +351,7 @@ pub async fn replace_document_pdf(
     if raw.len() > MAX_UPLOAD_BYTES {
         anyhow::bail!(
             "Fichier trop volumineux (max {} Mo).",
-            MAX_UPLOAD_BYTES / (1024 * 1024)
+            crate::limits::UPLOAD_LIMIT_MO
         );
     }
     if !crate::preview::looks_like_pdf(&raw) {
@@ -271,8 +365,8 @@ pub async fn replace_document_pdf(
     } else {
         format!("{filename}.pdf")
     };
-    let checksum = format!("sha-{document_id}-{}", raw.len());
-    // Keep the previous PDF before overwriting it, so an
+    let checksum = content_checksum(&raw);
+    // M1 (Syn RO !36): keep the previous PDF before overwriting it, so an
     // unwanted/malicious Stirling commit is recoverable.
     let saved = sqlx::query(
         r#"insert into document_previous_versions
@@ -553,7 +647,7 @@ pub async fn auto_classify(pool: &PgPool, document_id: i32, content: &str, ocr: 
         value: &str,
         owner_id: i32,
     ) -> sqlx::Result<()> {
-        // resolve custom field by name + owner only.
+        // SYN-27: resolve custom field by name + owner only.
         let field: Option<i32> = sqlx::query_scalar(
             "select id from custom_fields where name = $1 and owner_id = $2",
         )
@@ -591,7 +685,7 @@ pub async fn auto_classify(pool: &PgPool, document_id: i32, content: &str, ocr: 
 }
 
 pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: i32) -> anyhow::Result<ConsumeResult> {
-    // refuse kimi/mistral / unknown before any OCR call.
+    // SYN-72: refuse kimi/mistral / unknown before any OCR call.
     input.provider = require_consume_provider(&input.provider)?.to_string();
     input.filename = crate::limits::clamp_filename(&input.filename);
     if let Some(t) = input.title_override.as_mut() {
@@ -613,7 +707,7 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
     if raw.len() as u64 > MAX_UPLOAD_BYTES as u64 {
         anyhow::bail!(
             "Fichier trop volumineux (max {} Mo).",
-            MAX_UPLOAD_BYTES / (1024 * 1024)
+            crate::limits::UPLOAD_LIMIT_MO
         );
     }
     // Browsers often send application/octet-stream; sniff magic so mime + /file stay PDF/PNG/JPEG.
@@ -637,7 +731,7 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
             }
         }
     }
-    // magic allowlist — reject anything that is not PDF/PNG/JPEG.
+    // SYN-31: magic allowlist — reject anything that is not PDF/PNG/JPEG.
     {
         let ok = raw.starts_with(b"%PDF")
             || crate::preview::looks_like_png(raw.as_ref())
@@ -660,6 +754,19 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
                 input.mime_type = "image/jpeg".into();
             }
         }
+    }
+    let checksum = content_checksum(&raw);
+    if let Some(existing) = find_active_document_by_checksum(pool, owner_id, &checksum).await? {
+        tracing::info!(document_id = existing, "consume skipped: duplicate checksum");
+        let mut ocr = fallback_ocr(&input.filename);
+        ocr.summary = "Déjà présent".into();
+        return Ok(ConsumeResult {
+            document_id: existing,
+            ocr,
+            used_llm: false,
+            error: None,
+            duplicate: true,
+        });
     }
     let job_id: i32 = sqlx::query_scalar(
         "insert into consume_jobs (filename, status, message, owner_id) values ($1,'processing','OCR en cours',$2) returning id",
@@ -700,7 +807,7 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
         user_key.as_deref(),
         input.api_key.as_deref(),
     );
-    // never honor consume `baseUrl` — settings `ocrBaseUrl` only.
+    // SYN-64: never honor consume `baseUrl` — settings `ocrBaseUrl` only.
     let base_url = load_ocr_base_url(pool, owner_id).await;
     let skip = input.skip_ocr.unwrap_or(false);
     let selfhosted_ok = input.provider == "selfhosted" && base_url.is_some();
@@ -711,7 +818,7 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
         key.is_some()
     };
 
-    // Arc avoids a full raw clone for PDFium; semaphore bounds concurrency.
+    // SYN-48: Arc avoids a full raw clone for PDFium; semaphore bounds concurrency.
     let raw = std::sync::Arc::<[u8]>::from(raw.into_boxed_slice());
     let mime_for_preview = input.mime_type.clone();
     let raw_for_preview = std::sync::Arc::clone(&raw);
@@ -734,7 +841,7 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
     }
 
     // JPEG pages only — never send paper SVG or image/svg+xml to Grok.
-    // borrow rendered pages for OCR (no clone); store_pages still uses the same Vec.
+    // SYN-48: borrow rendered pages for OCR (no clone); store_pages still uses the same Vec.
     let rendered_pages = rendered_pages.unwrap_or_default();
     let can_vision = !rendered_pages.is_empty();
 
@@ -804,7 +911,7 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
     .take(18)
     .map(str::to_string)
     .collect();
-    // allocate ASN under advisory lock in the same txn as INSERT so races
+    // SYN-69: allocate ASN under advisory lock in the same txn as INSERT so races
     // cannot collide; on insert failure after OCR was paid, mark the job failed.
     let mut tx = pool.begin().await?;
     let asn = match allocate_asn(&mut tx, owner_id).await {
@@ -870,7 +977,6 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
         "pending"
     };
     let ocr_provider: Option<&str> = if used_llm { Some(&input.provider) } else { None };
-    let checksum = format!("sha-{asn}-{}", raw.len());
     let document_id: i32 = match sqlx::query_scalar(
         r#"insert into documents (
       title, content, created_date, asn, checksum, mime_type, original_filename,
@@ -947,11 +1053,12 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
         ocr,
         used_llm,
         error,
+        duplicate: false,
     })
 }
 
 pub async fn re_ocr_document(pool: &PgPool, mut opts: OcrInput, owner_id: i32) -> anyhow::Result<serde_json::Value> {
-    // refuse kimi/mistral / unknown (would otherwise hit x.ai with wrong key).
+    // SYN-72: refuse kimi/mistral / unknown (would otherwise hit x.ai with wrong key).
     let Some(p) = crate::llm_keys::normalize_consume_provider(&opts.provider) else {
         return Ok(serde_json::json!({
             "ok": false,
@@ -1167,5 +1274,30 @@ mod classify_tag_tests {
         let names = classify_tag_names(&owner, &result, hay, hay, hay, "2026");
         assert!(names.iter().any(|n| n == "Inbox"));
         assert!(may_ensure_ocr_tag("Inbox", false));
+    }
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::{checksum_from_sha256_hex, content_checksum};
+
+    #[test]
+    fn sha256_of_abc() {
+        let sum = content_checksum(b"abc");
+        assert_eq!(
+            sum,
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn hex_lookup_normalizes_case() {
+        let hex = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD";
+        assert_eq!(
+            checksum_from_sha256_hex(hex).as_deref(),
+            Some(content_checksum(b"abc").as_str())
+        );
+        assert!(checksum_from_sha256_hex("abcd").is_none());
+        assert!(checksum_from_sha256_hex(&format!("{hex}zz")).is_none());
     }
 }

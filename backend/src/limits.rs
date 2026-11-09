@@ -1,4 +1,4 @@
-//! Upload size, memory, and PDFium concurrency guards.
+//! SYN-47 / SYN-48 / SYN-49 — upload size, memory, and PDFium concurrency guards.
 
 pub const MAX_TITLE_CHARS: usize = 500;
 pub const MAX_FILENAME_CHARS: usize = 255;
@@ -17,18 +17,28 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-/// Default JSON / settings body cap (). Large uploads use [`MAX_UPLOAD_BYTES`]
+/// Default JSON / settings body cap (SYN-47). Large uploads use [`MAX_UPLOAD_BYTES`]
 /// only on consume / ingest / post_document routes.
 pub const DEFAULT_BODY_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 
-/// Practical upload / OCR cap (). Was 300 MiB; lowered to limit memory amplification
-/// (raw + rendered JPEGs + INSERT). Keep Ingress `proxy-body-size` ≥ this value.
-pub const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+/// Cloudflare Free/Pro proxied request-body cap: 100 MB (decimal).
+/// The axum limit on upload routes is this value.
+pub const CLOUDFLARE_MAX_BODY_BYTES: usize = 100 * 1000 * 1000;
 
-/// Concurrent PDFium / heavy render+OCR jobs (/ ).
+/// Multipart framing (boundary, filename, fields) on top of the file bytes.
+pub const MULTIPART_OVERHEAD_BYTES: usize = 64 * 1024;
+
+/// Max stored file size. Stays under [`CLOUDFLARE_MAX_BODY_BYTES`] so the whole
+/// request fits the Cloudflare cap. Ingress `proxy-body-size` must allow that body.
+pub const MAX_UPLOAD_BYTES: usize = CLOUDFLARE_MAX_BODY_BYTES - MULTIPART_OVERHEAD_BYTES;
+
+/// Round cap shown in the UI and in French error strings.
+pub const UPLOAD_LIMIT_MO: usize = 100;
+
+/// Concurrent PDFium / heavy render+OCR jobs (SYN-48 / SYN-49).
 const HEAVY_JOB_PERMITS: usize = 2;
 
-/// Max wait for a heavy-job permit (). Avoids queueing forever behind stuck PDFium.
+/// Max wait for a heavy-job permit (SYN-49). Avoids queueing forever behind stuck PDFium.
 pub const HEAVY_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 
 static HEAVY_JOBS: LazyLock<Arc<Semaphore>> =
@@ -57,7 +67,7 @@ pub async fn acquire_heavy_job_within(
 /// On timeout the caller gets an error **immediately**. The JoinHandle is detached
 /// into a background task that keeps the semaphore permit until PDFium finishes
 /// (`spawn_blocking` cannot cancel in-process work). Do not `join.await` on the
-/// request path.
+/// request path (SYN-49 / Syn re-review).
 pub async fn run_heavy_blocking<T, F>(
     timeout: Duration,
     f: F,
@@ -108,9 +118,14 @@ mod tests {
 
     #[test]
     fn upload_cap_is_practical() {
-        // well below the historical 300 MiB API-wide limit.
-        assert!(MAX_UPLOAD_BYTES <= 64 * 1024 * 1024);
-        assert!(MAX_UPLOAD_BYTES >= 16 * 1024 * 1024);
+        assert_eq!(CLOUDFLARE_MAX_BODY_BYTES, 100 * 1000 * 1000);
+        assert!(MAX_UPLOAD_BYTES < CLOUDFLARE_MAX_BODY_BYTES);
+        assert!(MAX_UPLOAD_BYTES > 90 * 1000 * 1000);
+        assert_eq!(UPLOAD_LIMIT_MO, 100);
+        assert_eq!(
+            CLOUDFLARE_MAX_BODY_BYTES,
+            MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

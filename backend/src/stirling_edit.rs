@@ -19,7 +19,7 @@
 use crate::auth;
 use crate::limits::MAX_UPLOAD_BYTES;
 use crate::preview::looks_like_pdf;
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, body::Body};
 use base64::Engine;
@@ -682,13 +682,10 @@ pub async fn serve_session_file(pool: &PgPool, token: &str, method_is_head: bool
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "file").into_response())
 }
 
-/// CORS for `GET /api/edit/stirling/{token}/file` only.
-/// The token is in the URL, so credentials are not allowed. HEAD and OPTIONS
-/// get no CORS headers. ACAO mirrors a known Stirling Origin (never `*`).
-pub fn apply_stirling_file_cors(method: &Method, headers: &HeaderMap, res: &mut Response) {
-    if *method != Method::GET {
-        return;
-    }
+/// CORS for the signed Stirling file response (GET, HEAD, and OPTIONS).
+/// ACAO mirrors a known Stirling origin and is never `*`. Credentials are set
+/// only together with that reflected Origin.
+pub fn apply_stirling_file_cors(headers: &HeaderMap, res: &mut Response) {
     let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
         .and_then(|v| v.to_str().ok())
@@ -703,7 +700,11 @@ pub fn apply_stirling_file_cors(method: &Method, headers: &HeaderMap, res: &mut 
             .insert(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
         res.headers_mut().insert(
             axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-            HeaderValue::from_static("GET"),
+            HeaderValue::from_static("GET, HEAD, OPTIONS"),
+        );
+        res.headers_mut().insert(
+            axum::http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+            HeaderValue::from_static("true"),
         );
         res.headers_mut().insert(
             axum::http::header::VARY,
@@ -1362,9 +1363,11 @@ mod tests {
     }
 
     #[test]
-    fn file_cors_is_get_only_without_credentials() {
+    fn file_cors_reflects_allowlisted_origin_with_credentials() {
+        use axum::http::Method;
         use axum::http::header::{
-            ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_ORIGIN, ORIGIN,
+            ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_METHODS,
+            ACCESS_CONTROL_ALLOW_ORIGIN, ORIGIN,
         };
         use axum::response::IntoResponse;
 
@@ -1372,32 +1375,37 @@ mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(ORIGIN, "https://stirling.example".parse().unwrap());
 
-            let mut get_res = StatusCode::OK.into_response();
-            apply_stirling_file_cors(&Method::GET, &headers, &mut get_res);
-            assert_eq!(
-                get_res
-                    .headers()
-                    .get(ACCESS_CONTROL_ALLOW_ORIGIN)
-                    .and_then(|v| v.to_str().ok()),
-                Some("https://stirling.example")
-            );
-            assert!(get_res.headers().get(ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none());
-
-            for method in [Method::HEAD, Method::OPTIONS, Method::POST] {
+            for _method in [Method::GET, Method::HEAD, Method::OPTIONS] {
                 let mut res = StatusCode::OK.into_response();
-                apply_stirling_file_cors(&method, &headers, &mut res);
-                assert!(
-                    res.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none(),
-                    "{method}"
+                apply_stirling_file_cors(&headers, &mut res);
+                assert_eq!(
+                    res.headers()
+                        .get(ACCESS_CONTROL_ALLOW_ORIGIN)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("https://stirling.example")
                 );
-                assert!(res.headers().get(ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none());
+                assert_eq!(
+                    res.headers()
+                        .get(ACCESS_CONTROL_ALLOW_METHODS)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("GET, HEAD, OPTIONS")
+                );
+                assert_eq!(
+                    res.headers()
+                        .get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                        .and_then(|v| v.to_str().ok()),
+                    Some("true")
+                );
             }
 
             headers.insert(ORIGIN, "https://evil.example".parse().unwrap());
             let mut denied = StatusCode::OK.into_response();
-            apply_stirling_file_cors(&Method::GET, &headers, &mut denied);
+            apply_stirling_file_cors(&headers, &mut denied);
             assert!(denied.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
-            assert!(denied.headers().get(ACCESS_CONTROL_ALLOW_CREDENTIALS).is_none());
+            assert!(denied
+                .headers()
+                .get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
+                .is_none());
         });
     }
 

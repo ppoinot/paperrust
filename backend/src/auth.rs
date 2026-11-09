@@ -16,7 +16,7 @@ const SESSION_COOKIE_DEFAULT: &str = "paperrust_session";
 const STATE_COOKIE: &str = "paperrust_oidc_state";
 const SESSION_TTL_SECS: i64 = 60 * 60 * 24 * 14;
 const PENDING_TTL_SECS: i64 = 60 * 15;
-const SLUG_DEFAULT: &str = "app";
+const SLUG_DEFAULT: &str = "paperrust";
 
 fn oidc_slug() -> String {
     // OIDC application slug. Set PAPERRUST_OIDC_CLIENT_ID; this default is only
@@ -107,6 +107,16 @@ pub fn is_public_path(path: &str) -> bool {
             | "/api/documents/post_document"
             // Cron purge — gated by PAPERRUST_CRON_TOKEN header inside the handler.
             | "/api/cron/purge-trash"
+            // MCP Streamable HTTP — bearer checked inside the handler, not the session.
+            | "/api/mcp"
+            // OAuth discovery and consent sit outside the session gate. Listed so a
+            // later merge of routers cannot demand a cookie first.
+            | "/oauth/authorize"
+            | "/oauth/token"
+            | "/oauth/register"
+            | "/.well-known/oauth-protected-resource"
+            | "/.well-known/oauth-protected-resource/api/mcp"
+            | "/.well-known/oauth-authorization-server"
     )
 }
 
@@ -299,9 +309,9 @@ fn first_host_header(headers: &HeaderMap, key: axum::http::HeaderName) -> String
         .to_string()
 }
 
-/// Trust X-Forwarded-For / -Proto only when the TCP peer is exactly 127.0.0.1
-/// (after IPv4-mapped canonicalize). A non-loopback peer must not select a
-/// public origin. X-Forwarded-Host is never used ().
+/// Trust X-Forwarded-For / -Proto / -Host only when the TCP peer is exactly
+/// 127.0.0.1 (after IPv4-mapped canonicalize). A non-loopback peer must not
+/// select a public origin via X-Forwarded-Host.
 pub fn peer_trusts_xfh(peer: Option<std::net::IpAddr>) -> bool {
     match peer {
         Some(std::net::IpAddr::V4(v4)) => v4 == std::net::Ipv4Addr::LOCALHOST,
@@ -357,8 +367,20 @@ fn peer_looks_private(peer: Option<std::net::IpAddr>) -> bool {
 /// or issuer is ever inferred from untrusted input. Unknown hosts are not
 /// copied into `redirect_uri` (`app_origin_for`).
 pub fn request_host(headers: &HeaderMap, peer: Option<std::net::IpAddr>) -> String {
-    // X-Forwarded-Host is ignored entirely. Only Host is used
-    // (cloudflared sets Host from its route; ingress-nginx passes Host).
+    // Loopback peers (127.0.0.1 only) may pass X-Forwarded-Host when that host
+    // is an already configured public or LAN origin. Other peers cannot.
+    if peer_trusts_xfh(peer) {
+        let xfh = first_host_header(
+            headers,
+            axum::http::header::HeaderName::from_static("x-forwarded-host"),
+        );
+        if !xfh.is_empty() {
+            match host_realm(&xfh) {
+                Realm::Public | Realm::Lan => return xfh,
+                _ => {}
+            }
+        }
+    }
     let host = first_host_header(headers, HOST);
     match host_realm(&host) {
         // Public origin only from the trusted loopback proxy (tunnel sidecar).
@@ -777,10 +799,10 @@ pub fn client_id() -> Option<String> {
 }
 
 /// Public OIDC client used by mobile / native interactive API (PKCE).
-/// Placeholder `mobile` until `PAPERRUST_OIDC_MOBILE_CLIENT_ID` is set.
+/// Default `paperrust-mobile` until `PAPERRUST_OIDC_MOBILE_CLIENT_ID` is set.
 pub fn mobile_client_id() -> String {
     env_first(&["PAPERRUST_OIDC_MOBILE_CLIENT_ID"])
-        .unwrap_or_else(|| "mobile".to_string())
+        .unwrap_or_else(|| "paperrust-mobile".to_string())
 }
 
 /// Public mobile OIDC issuer (`PAPERRUST_OIDC_MOBILE_ISSUER`).
@@ -1162,7 +1184,11 @@ async fn user_from_oidc_bearer(
 }
 
 /// Session cookie first (unchanged web path). Else OIDC Bearer `access_token`.
-/// `pr_…` personal tokens are not accepted here — ingest handlers only.
+/// `pr_…` personal tokens are not accepted here. The auth gate accepts a
+/// `documents:read` token only on the read allowlist, `documents:meta` only on
+/// `POST /api/documents/{id}/meta`, and `diagnostics:read` only on the journal
+/// routes. Ingest handlers accept `ingest` only. `/api/mcp` does not accept
+/// this cookie or a `pr_…` presented by the caller.
 pub async fn user_from_headers(
     pool: &PgPool,
     headers: &HeaderMap,
@@ -1179,11 +1205,22 @@ pub async fn user_from_headers(
 #[derive(Clone, Copy, Debug)]
 pub struct IngestTokenScope;
 
-/// Ingest `pr_…` token → owning user. Not a session and not a general API login.
-pub async fn user_from_ingest_token(pool: &PgPool, headers: &HeaderMap) -> Option<AuthUser> {
-    let raw = crate::api_tokens::raw_token_from_headers(headers)?;
-    let (_token_id, owner_id) = crate::api_tokens::authenticate(pool, &raw).await.ok()??;
-    fetch_user_by_id(pool, owner_id).await
+/// Marker: this request authenticated with a `documents:read` token.
+/// Handlers use it to page and drop thumbnails. It is not a session.
+#[derive(Clone, Copy, Debug)]
+pub struct ReadTokenScope;
+
+/// Marker: this request authenticated with a `documents:meta` token.
+/// The meta handler refuses an OCR `content` replacement when this is set.
+#[derive(Clone, Copy, Debug)]
+pub struct MetaTokenScope;
+
+/// Marker: this request authenticated with a `diagnostics:read` token.
+#[derive(Clone, Copy, Debug)]
+pub struct DiagTokenScope;
+
+pub async fn user_by_id(pool: &PgPool, id: i32) -> Option<AuthUser> {
+    fetch_user_by_id(pool, id).await
 }
 
 fn set_named_cookie(name: &str, value: &str, max_age: i64, secure: bool) -> HeaderValue {
@@ -1193,6 +1230,23 @@ fn set_named_cookie(name: &str, value: &str, max_age: i64, secure: bool) -> Head
         v.push_str("; Secure");
     }
     HeaderValue::from_str(&v).unwrap_or_else(|_| HeaderValue::from_static("cookie"))
+}
+
+/// Short-lived resume of `/oauth/authorize` across the OIDC round trip.
+/// SameSite=Lax so the top-level callback from the IdP still carries it.
+pub const OAUTH_RESUME_COOKIE: &str = "pr_oauth_next";
+const OAUTH_RESUME_TTL_SECS: i64 = 600;
+
+pub fn oauth_resume_cookie(headers: &HeaderMap) -> Option<String> {
+    cookie_from_headers(headers, OAUTH_RESUME_COOKIE)
+}
+
+pub fn set_oauth_resume_cookie(value: &str, secure: bool) -> HeaderValue {
+    set_named_cookie(OAUTH_RESUME_COOKIE, value, OAUTH_RESUME_TTL_SECS, secure)
+}
+
+pub fn clear_oauth_resume_cookie(secure: bool) -> HeaderValue {
+    set_named_cookie(OAUTH_RESUME_COOKIE, "deleted", 0, secure)
 }
 
 fn set_cookie_header(token: &str, max_age: i64, secure: bool) -> HeaderValue {
@@ -1656,7 +1710,9 @@ pub async fn finish_callback(
             .into_response();
     }
     let host = request_host(headers, peer);
-    let landing = post_login_url_for(&host);
+    let secure = cookie_secure(headers, peer);
+    let landing =
+        crate::mcp_oauth::resume_location(headers).unwrap_or_else(|| post_login_url_for(&host));
     let Some(cookie_val) = sign_session_token(&token) else {
         tracing::error!("SESSION_SECRET missing at session cookie");
         return (
@@ -1666,8 +1722,9 @@ pub async fn finish_callback(
             .into_response();
     };
     found_with_cookies(&landing, [
-        set_cookie_header(&cookie_val, SESSION_TTL_SECS, cookie_secure(headers, peer)),
-        clear_state_cookie(cookie_secure(headers, peer)),
+        set_cookie_header(&cookie_val, SESSION_TTL_SECS, secure),
+        clear_state_cookie(secure),
+        clear_oauth_resume_cookie(secure),
     ])
 }
 
@@ -1885,7 +1942,7 @@ mod syn16_xfh_tests {
     const LAN_ISS: &str = "https://auth.lan.test";
     const BETA_MOBILE_ISS: &str = "https://auth.example/application/o/archive-mobile/";
     const LAN_MOBILE_ISS: &str = "https://auth.lan.test/application/o/archive-mobile/";
-    const WEB_PROD_ISS: &str = "https://auth.example/application/o/app/";
+    const WEB_PROD_ISS: &str = "https://auth.example/application/o/paperrust/";
     const BARE_PUBLIC_ISS: &str = "https://auth.example/";
 
     struct EnvRestore {
@@ -2094,16 +2151,19 @@ https://archive.legacy.test=https://auth.legacy.test",
     }
 
     #[test]
-    fn loopback_peer_xfh_is_ignored() {
+    fn loopback_peer_honors_forwarded_host() {
         with_example_realms(|| {
-            // X-Forwarded-Host never selects the origin, even from 127.0.0.1.
             let h = headers_with("127.0.0.1:8788", Some(PUBLIC_HOST));
             let peer = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
             assert!(!loopback_host_unlisted(&h, peer));
             let host = request_host(&h, peer);
-            assert_ne!(host_realm(&host), Realm::Public);
-            assert_ne!(issuer_base(&host), PUBLIC_ISS);
-            assert_eq!(redirect_uri_for(&host), "http://127.0.0.1:8788/api/auth/callback");
+            assert_eq!(host_realm(&host), Realm::Public);
+            assert_eq!(host_name(&host), PUBLIC_HOST);
+            assert_eq!(
+                redirect_uri_for(&host),
+                "https://archive.example/api/auth/callback"
+            );
+            assert_eq!(issuer_base(&host), PUBLIC_ISS);
         });
     }
 
@@ -2572,7 +2632,7 @@ https://archive.legacy.test=https://auth.legacy.test",
                 t != "https://auth.example"
                     && t != "https://auth.lan.test"
                     && t != "https://auth.legacy.test"
-                    && !t.ends_with("/application/o/app")
+                    && !t.ends_with("/application/o/paperrust")
                     && !t.ends_with("/application/o/preview")
             }),
             "Bearer allowlist must not include bare host or web slugs: {issuers:?}"
@@ -2594,7 +2654,7 @@ https://archive.legacy.test=https://auth.legacy.test",
                 allowed_issuers_for_host(LEGACY_HOST).is_empty(),
                 "unset MOBILE_ISSUER_LAN must fail-closed on LAN host"
             );
-            let token = unsigned_iss_jwt(BETA_MOBILE_ISS, serde_json::json!({"aud": "mobile"}));
+            let token = unsigned_iss_jwt(BETA_MOBILE_ISS, serde_json::json!({"aud": "paperrust-mobile"}));
             assert!(
                 resolve_bearer_jwks(PUBLIC_HOST, &token).is_none(),
                 "Bearer mobile disabled when env unset"
@@ -2635,13 +2695,13 @@ https://archive.legacy.test=https://auth.legacy.test",
             assert_eq!(issuer_base(PUBLIC_HOST), PUBLIC_ISS);
             assert_eq!(
                 end_session_for(PUBLIC_HOST),
-                "https://auth.example/application/o/app/end-session/"
+                "https://auth.example/application/o/paperrust/end-session/"
             );
             assert_eq!(
                 discovery_urls(PUBLIC_ISS),
                 vec![
                     "https://auth.example/.well-known/openid-configuration".to_string(),
-                    "https://auth.example/application/o/app/.well-known/openid-configuration"
+                    "https://auth.example/application/o/paperrust/.well-known/openid-configuration"
                         .to_string(),
                 ]
             );
@@ -2653,7 +2713,7 @@ https://archive.legacy.test=https://auth.legacy.test",
         with_mobile_issuers(|| {
             let token = unsigned_iss_jwt(
                 BETA_MOBILE_ISS,
-                serde_json::json!({"aud": "mobile"}),
+                serde_json::json!({"aud": "paperrust-mobile"}),
             );
             let (issuers, jwks) =
                 resolve_bearer_jwks(PUBLIC_HOST, &token).expect("allowlisted");
@@ -2665,7 +2725,7 @@ https://archive.legacy.test=https://auth.legacy.test",
             let signed = crate::jwks::tests_sign_rs256(
                 serde_json::json!({
                     "iss": BETA_MOBILE_ISS,
-                    "aud": "mobile",
+                    "aud": "paperrust-mobile",
                     "sub": "user-1",
                     "exp": 4_102_444_800u64,
                     "iat": 1_700_000_000u64,
@@ -2675,7 +2735,7 @@ https://archive.legacy.test=https://auth.legacy.test",
             crate::jwks::verify_access_token_with_test_keys(
                 &signed,
                 &issuers,
-                "mobile",
+                "paperrust-mobile",
             )
             .expect("mobile token must verify");
         });
@@ -2700,7 +2760,7 @@ https://archive.legacy.test=https://auth.legacy.test",
         with_mobile_issuers(|| {
             let token = unsigned_iss_jwt(
                 BARE_PUBLIC_ISS,
-                serde_json::json!({"aud": "mobile"}),
+                serde_json::json!({"aud": "paperrust-mobile"}),
             );
             assert!(
                 resolve_bearer_jwks(PUBLIC_HOST, &token).is_none(),
@@ -2714,7 +2774,7 @@ https://archive.legacy.test=https://auth.legacy.test",
         with_mobile_issuers(|| {
             let token = unsigned_iss_jwt(
                 BETA_MOBILE_ISS,
-                serde_json::json!({"aud": "mobile"}),
+                serde_json::json!({"aud": "paperrust-mobile"}),
             );
             assert!(
                 resolve_bearer_jwks(LEGACY_HOST, &token).is_none(),
@@ -2722,7 +2782,7 @@ https://archive.legacy.test=https://auth.legacy.test",
             );
             let lan_ok = unsigned_iss_jwt(
                 LAN_MOBILE_ISS,
-                serde_json::json!({"aud": "mobile"}),
+                serde_json::json!({"aud": "paperrust-mobile"}),
             );
             let (_, jwks) = resolve_bearer_jwks(LEGACY_HOST, &lan_ok).expect("LAN issuer");
             assert_eq!(
@@ -2761,10 +2821,40 @@ https://archive.legacy.test=https://auth.legacy.test",
     fn mobile_client_id_defaults_and_env() {
         let _guard = crate::instance::env_lock().lock().unwrap();
         let _clear = EnvRestore::apply(&[("PAPERRUST_OIDC_MOBILE_CLIENT_ID", None)]);
-        assert_eq!(mobile_client_id(), "mobile");
+        assert_eq!(mobile_client_id(), "paperrust-mobile");
         unsafe {
             std::env::set_var("PAPERRUST_OIDC_MOBILE_CLIENT_ID", "custom-mobile");
         }
         assert_eq!(mobile_client_id(), "custom-mobile");
+    }
+
+    #[test]
+    fn stirling_token_paths_are_public() {
+        assert!(is_public_path(
+            "/api/edit/stirling/abcdefghijklmnop.sig/file"
+        ));
+        assert!(is_public_path(
+            "/api/edit/stirling/abcdefghijklmnop.sig/commit"
+        ));
+        assert!(is_public_path("/api/mcp"));
+        assert!(is_public_path("/oauth/authorize"));
+        assert!(is_public_path("/oauth/token"));
+        assert!(is_public_path("/oauth/register"));
+        assert!(is_public_path("/.well-known/oauth-protected-resource"));
+        assert!(is_public_path("/.well-known/oauth-protected-resource/api/mcp"));
+        assert!(is_public_path("/.well-known/oauth-authorization-server"));
+        assert!(!is_public_path("/api/documents/1/edit/stirling"));
+        assert!(!is_public_path("/api/edit/stirling/short/file"));
+        assert!(!is_public_path("/api/edit/stirling/abcdefghijklmnop/open"));
+    }
+
+    #[test]
+    fn lan_request_host_follows_lan_urls() {
+        with_example_realms(|| {
+            assert!(is_lan_request_host("archive.lan.test"));
+            assert!(is_lan_request_host("archive.lan.test:443"));
+            assert!(!is_lan_request_host("archive.example"));
+            assert!(!is_lan_request_host("127.0.0.1:8788"));
+        });
     }
 }

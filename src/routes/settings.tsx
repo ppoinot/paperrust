@@ -44,9 +44,11 @@ import {
   type OAuthLlmProvider,
 } from "@/lib/paperless/llm-oauth";
 import {
+  STIRLING_NOT_CONFIGURED,
   STIRLING_SETTINGS_HELP,
   STIRLING_SETTINGS_TOC_ID,
   loadStirlingBaseUrl,
+  stirlingConfiguredFrom,
   readStirlingBaseUrlOverride,
   writeStirlingBaseUrlOverride,
 } from "@/lib/paperless/stirling-edit";
@@ -64,6 +66,24 @@ const SETTINGS_TOC: readonly SettingsTocItem[] = [
   { id: "settings-corbeille", label: "Corbeille" },
 ];
 
+type TokenPreset = "ingest" | "documents:read" | "mcp";
+
+const TOKEN_NAME_DEFAULTS = new Set(["", "iPhone", "Bot lecture", "Connecteur MCP"]);
+
+function defaultTokenName(scope: TokenPreset): string {
+  if (scope === "mcp") return "Connecteur MCP";
+  if (scope === "documents:read") return "Bot lecture";
+  return "iPhone";
+}
+
+function scopeChip(scope: string): string {
+  if (scope === "documents:read") return "lecture";
+  if (scope === "documents:meta") return "étiquettes";
+  if (scope === "diagnostics:read") return "journaux";
+  if (scope === "ingest") return "dépôt";
+  return "autre";
+}
+
 function Page() {
   const qc = useQueryClient();
   const remote = useQuery({ queryKey: ["settings"], queryFn: () => fetchSettings() });
@@ -73,8 +93,10 @@ function Page() {
   const [autoMatch, setAutoMatch] = useState(true);
   const [trashRetentionDays, setTrashRetentionDays] = useState<30 | 60 | 90>(30);
   const [stirlingBaseUrl, setStirlingBaseUrl] = useState(readStirlingBaseUrlOverride);
-  const [stirlingPlaceholder, setStirlingPlaceholder] = useState("https://pdf.example");
+  const [stirlingPlaceholder, setStirlingPlaceholder] = useState("");
+  const [stirlingConfigured, setStirlingConfigured] = useState<boolean | null>(null);
   const [tokenName, setTokenName] = useState("iPhone");
+  const [tokenScope, setTokenScope] = useState<TokenPreset>("ingest");
   const [freshToken, setFreshToken] = useState<string | null>(null);
   const [oauthByProvider] = useState(
     () =>
@@ -86,7 +108,9 @@ function Page() {
   useEffect(() => {
     let cancelled = false;
     void loadStirlingBaseUrl().then((url) => {
-      if (!cancelled && url) setStirlingPlaceholder(url);
+      if (cancelled) return;
+      if (url) setStirlingPlaceholder(url);
+      setStirlingConfigured(stirlingConfiguredFrom(url));
     });
     return () => {
       cancelled = true;
@@ -209,7 +233,16 @@ function Page() {
   });
 
   const createToken = useMutation({
-    mutationFn: async () => createApiToken({ data: { name: tokenName.trim() || "iPhone" } }),
+    mutationFn: async () =>
+      createApiToken({
+        data: {
+          name: tokenName.trim() || defaultTokenName(tokenScope),
+          scopes:
+            tokenScope === "mcp"
+              ? ["ingest", "documents:read", "documents:meta", "diagnostics:read"]
+              : [tokenScope],
+        },
+      }),
     onSuccess: (res) => {
       setFreshToken(res.token);
       qc.invalidateQueries({ queryKey: ["api-tokens"] });
@@ -413,22 +446,34 @@ function Page() {
           </div>
         </section>
         <section id="settings-api-tokens" className="scroll-mt-24 rounded-xl bg-surface p-5 shadow-[var(--shadow-border)]">
-          <h2 className="font-display text-xl">Tokens API (iPhone / Quickscan)</h2>
+          <h2 className="font-display text-xl">Tokens API</h2>
           <p className="mt-1 text-sm text-muted">
-            Scope : ingest uniquement. Créez un token <span className="font-mono text-xs">pr_…</span> puis
-            utilisez-le ainsi :
+            Chaque secret <span className="font-mono text-xs">pr_…</span> est affiché une seule fois,
+            stocké sous forme d’empreinte, et limité au scope choisi. Un token de lecture ne peut pas
+            déposer, modifier, ni ouvrir les réglages. Révoquez-le ici s’il a fuité.
           </p>
           <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-muted">
             <li>
-              Raccourci iOS — <span className="font-mono text-xs">POST /api/v1/ingest</span> +{" "}
-              <span className="font-mono text-xs">Authorization: Bearer pr_…</span>
+              Dépôt — raccourci iOS <span className="font-mono text-xs">POST /api/v1/ingest</span>, ou
+              Quickscan <span className="font-mono text-xs">POST /api/documents/post_document/</span> avec{" "}
+              <span className="font-mono text-xs">Authorization: Token pr_…</span>.
             </li>
             <li>
-              Quickscan (mode Paperless-ngx) — URL de base{" "}
-              <span className="font-mono text-xs">{typeof window !== "undefined" ? window.location.origin : "l'adresse de cette archive"}</span>
-              , token collé tel quel ; upload via{" "}
+              Quickscan (mode Paperless-ngx) — URL de base de cette archive, jeton collé tel quel,
+              envoi{" "}
               <span className="font-mono text-xs">POST /api/documents/post_document/</span> (
               <span className="font-mono text-xs">Authorization: Token pr_…</span>).
+            </li>
+            <li>
+              Lecture (bot) — <span className="font-mono text-xs">Authorization: Bearer pr_…</span> sur{" "}
+              <span className="font-mono text-xs">POST /api/documents/query</span>,{" "}
+              <span className="font-mono text-xs">GET /api/documents/{"{id}"}</span> et{" "}
+              <span className="font-mono text-xs">GET /api/documents/{"{id}"}/file</span>.
+            </li>
+            <li>
+              Connecteur MCP — le <span className="font-mono text-xs">pr_…</span> reste sur le
+              serveur. Le connecteur reçoit une autre clé. Ce jeton peut lire, étiqueter et voir les journaux.
+              Il ne peut ni déposer ni supprimer.
             </li>
           </ul>
           <div className="mt-4 flex flex-wrap items-end gap-2">
@@ -438,9 +483,33 @@ function Page() {
                 className="mt-1"
                 value={tokenName}
                 onChange={(e) => setTokenName(e.target.value)}
-                placeholder="iPhone"
+                placeholder={
+                  tokenScope === "mcp" ? "Connecteur" : tokenScope === "documents:read" ? "Lecture" : "iPhone"
+                }
                 maxLength={80}
               />
+            </div>
+            <div className="min-w-[12rem]">
+              <Label>Scope</Label>
+              <Select
+                value={tokenScope}
+                onValueChange={(value) => {
+                  const next = value as TokenPreset;
+                  setTokenName((current) =>
+                    TOKEN_NAME_DEFAULTS.has(current.trim()) ? defaultTokenName(next) : current,
+                  );
+                  setTokenScope(next);
+                }}
+              >
+                <SelectTrigger className="mt-1">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ingest">Dépôt (iPhone, Quickscan)</SelectItem>
+                  <SelectItem value="documents:read">Lecture (bot)</SelectItem>
+                  <SelectItem value="mcp">Connecteur MCP</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <Button
               type="button"
@@ -487,7 +556,7 @@ function Page() {
                   <div className="min-w-0">
                     <p className="text-fg">{t.name || "Token"}</p>
                     <p className="font-mono text-xs text-faint">
-                      {t.prefix}… · créé {t.createdAt}
+                      {t.prefix}… · {(t.scopes ?? ["ingest"]).map(scopeChip).join(", ")} · créé {t.createdAt}
                       {t.lastUsedAt ? ` · utiliséé ${t.lastUsedAt}` : ""}
                     </p>
                   </div>
@@ -529,6 +598,9 @@ function Page() {
                 writeStirlingBaseUrlOverride(next);
               }}
             />
+            {stirlingConfigured === false ? (
+              <p className="mt-2 text-sm text-muted">{STIRLING_NOT_CONFIGURED}</p>
+            ) : null}
           </div>
         </section>
         <section id="settings-archive" className="scroll-mt-24 rounded-xl bg-surface p-5 shadow-[var(--shadow-border)]">

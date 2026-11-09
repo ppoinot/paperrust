@@ -106,15 +106,29 @@ export async function uploadDocument({
   apiKey?: string;
   /** OpenAI-compatible base URL when provider is `selfhosted`. */
   baseUrl?: string;
-}>): Promise<{ documentId: number; ocr: unknown; usedLlm: boolean; error?: string; ocrStatus?: string }> {
+}>): Promise<{
+  documentId: number;
+  ocr: unknown;
+  usedLlm: boolean;
+  error?: string;
+  ocrStatus?: string;
+  duplicate?: boolean;
+}> {
   const form = new FormData();
   const name =
     data.filename?.trim() || (data.file instanceof File && data.file.name ? data.file.name : "upload.bin");
   form.append("file", data.file, name);
   form.append("provider", data.provider);
-  // do not send baseUrl on consume — OCR endpoint is settings-only.
+  // SYN-64: do not send baseUrl on consume — OCR endpoint is settings-only.
   // Per-user key is loaded server-side; do not send keys from the browser in prod.
   return apiForm("/api/documents/consume", form);
+}
+
+/** True when this owner already has these exact bytes outside the trash. */
+export async function findDuplicateBySha256(
+  sha256: string,
+): Promise<{ duplicate: boolean; documentId?: number } | null> {
+  return apiPost("/api/documents/checksum", { sha256 });
 }
 
 export async function rerunOcr({
@@ -333,8 +347,8 @@ export async function patchLlmApiKey({
   try {
     let raw: unknown;
     try {
-      // PATCH /api/settings/llm-keys + provider=xai is the live contract.
-      // Never call /api/settings/llm (404 on beta).
+      // PATCH /api/settings/llm-keys with provider=xai is the live contract.
+      // /api/settings/llm is not a route.
       raw = await apiPatch<unknown>(LLM_KEYS_PATH, body);
     } catch (err) {
       const status = httpStatusOf(err);
@@ -354,10 +368,14 @@ export async function patchLlmApiKey({
   }
 }
 
+export type ApiTokenScope = "ingest" | "documents:read" | "documents:meta" | "diagnostics:read";
+
 export type ApiTokenRow = {
   id: number;
   name: string;
   prefix: string;
+  /** Absent on a server that predates read scopes — treat as ingest only. */
+  scopes?: string[];
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
@@ -370,15 +388,19 @@ export async function fetchApiTokens(): Promise<ApiTokenRow[]> {
 
 export async function createApiToken({
   data,
-}: Data<{ name?: string }>): Promise<{
+}: Data<{ name?: string; scopes?: ApiTokenScope[] }>): Promise<{
   ok: boolean;
   id: number;
   name: string;
   prefix: string;
+  scopes: string[];
   token: string;
   createdAt: string;
 }> {
-  return apiPost("/api/settings/api-tokens", { name: data.name ?? "" });
+  return apiPost("/api/settings/api-tokens", {
+    name: data.name ?? "",
+    scopes: data.scopes ?? ["ingest"],
+  });
 }
 
 export async function revokeApiToken({ data }: Data<{ id: number }>): Promise<{ ok: boolean }> {
