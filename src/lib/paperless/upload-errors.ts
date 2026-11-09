@@ -1,9 +1,11 @@
+import { MAX_UPLOAD_BYTES as FILE_CAP, MAX_UPLOAD_LABEL } from "@/lib/http-error";
+
 /** Upload-only error UX. Never surface raw nginx/HTML to the user. */
 
-/** Hard cap — keep in sync with API `consume::MAX_UPLOAD_BYTES` and Ingress `proxy-body-size`. */
-export const MAX_UPLOAD_BYTES = 300 * 1024 * 1024;
+/** Hard cap — keep in sync with API `limits::MAX_UPLOAD_BYTES`. */
+export const MAX_UPLOAD_BYTES = FILE_CAP;
 
-export const UPLOAD_TOO_LARGE_FR = "Fichier trop volumineux (max. 300 Mo).";
+export const UPLOAD_TOO_LARGE_FR = `Fichier trop volumineux (max. ${MAX_UPLOAD_LABEL}).`;
 
 export function isHtmlErrorBody(text: string): boolean {
   const t = text.trimStart().slice(0, 512).toLowerCase();

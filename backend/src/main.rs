@@ -1,6 +1,9 @@
 mod auth;
 mod instance;
 mod api_tokens;
+mod diagnostics;
+mod mcp;
+mod mcp_oauth;
 mod jwks;
 mod consume;
 mod limits;
@@ -32,12 +35,16 @@ use std::path::PathBuf;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::ServeDir;
 
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
+
 use crate::auth::AuthUser;
 use crate::models::*;
 
 #[derive(Clone)]
-struct AppState {
-    pool: PgPool,
+pub(crate) struct AppState {
+    pub(crate) pool: PgPool,
     paperless_imports: crate::paperless_import::ImportHub,
 }
 
@@ -81,10 +88,11 @@ struct Health {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+    let fmt_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info".into());
+    tracing_subscriber::registry()
+        .with(diagnostics::DiagLayer.with_filter(tracing_subscriber::filter::LevelFilter::INFO))
+        .with(tracing_subscriber::fmt::layer().with_filter(fmt_filter))
         .init();
 
     llm_keys::assert_crypto_ready()?;
@@ -99,9 +107,31 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     crate::preview::ensure_schema(&pool).await?;
     crate::queries::ensure_trash_schema(&pool).await?;
+    crate::consume::ensure_checksum_index(&pool).await?;
+    {
+        let backfill = pool.clone();
+        tokio::spawn(async move {
+            match crate::consume::backfill_content_checksums(&backfill).await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("checksum backfill: {n} document(s)"),
+                Err(e) => tracing::warn!("checksum backfill: {e:#}"),
+            }
+        });
+    }
     auth::ensure_schema(&pool).await?;
     llm_keys::ensure_schema(&pool).await?;
     api_tokens::ensure_schema(&pool).await?;
+    mcp_oauth::ensure_schema(&pool).await?;
+    if let Ok(token) = std::env::var("PAPERRUST_MCP_API_TOKEN") {
+        let token = token.trim();
+        if token.starts_with("pr_") {
+            if let Err(err) =
+                api_tokens::grant_scope(&pool, token, api_tokens::SCOPE_INGEST).await
+            {
+                tracing::error!("mcp ingest grant failed: {err}");
+            }
+        }
+    }
     crate::paperless_import::ensure_schema(&pool).await?;
     crate::stirling_edit::ensure_schema(&pool).await?;
     seed::ensure_seeded(&pool).await?;
@@ -128,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
         ])
         .allow_credentials(true);
 
-    // large body limit only on upload routes; other API routes stay at ~2 MiB.
+    // SYN-47: large body limit only on upload routes; other API routes stay at ~2 MiB.
     let upload_routes = Router::new()
         .route("/api/documents/consume", post(consume))
         .route("/api/v1/ingest", post(ingest_v1))
@@ -140,7 +170,7 @@ async fn main() -> anyhow::Result<()> {
             post(stirling_commit_auth),
         )
         .route("/api/edit/stirling/{token}/commit", post(stirling_commit_token))
-        .layer(DefaultBodyLimit::max(crate::limits::MAX_UPLOAD_BYTES))
+        .layer(DefaultBodyLimit::max(crate::limits::CLOUDFLARE_MAX_BODY_BYTES))
         .layer(from_fn_with_state(state.clone(), auth_gate));
 
     let api_routes = Router::new()
@@ -159,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/me", get(me))
         .route("/api/catalog", get(catalog))
         .route("/api/dashboard", get(dashboard))
+        .route("/api/documents/checksum", post(checksum_lookup))
         .route("/api/documents/query", post(query_documents))
         .route("/api/documents/bulk", post(bulk))
         .route("/api/documents/purge-expired", post(purge_expired_for_user))
@@ -167,6 +198,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/documents/{id}/preview", get(preview))
         .route("/api/documents/{id}/preview/meta", get(preview_meta))
         .route("/api/documents/{id}/file", get(file_original).head(file_original))
+        .route("/api/documents/{id}/text", get(document_text))
+        .route("/api/documents/{id}/pages/{page}/text", get(document_page_text))
         .route("/api/documents/{id}/meta", post(meta))
         .route("/api/documents/{id}/ocr", post(ocr_rerun))
         .route("/api/documents/{id}/edit/stirling", post(stirling_start))
@@ -194,6 +227,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/notes", post(add_note))
         .route("/api/mail/simulate", post(simulate_mail))
         .route("/api/jobs", get(jobs))
+        .route("/api/diagnostics", get(diagnostics_log))
         .route("/api/settings", get(get_settings).post(save_settings).put(save_settings))
         .route("/api/settings/llm-keys", patch(patch_llm_key).post(patch_llm_key))
         .route("/api/settings/paperless-import", post(paperless_import_start))
@@ -204,9 +238,45 @@ async fn main() -> anyhow::Result<()> {
         .layer(DefaultBodyLimit::max(crate::limits::DEFAULT_BODY_LIMIT_BYTES))
         .layer(from_fn_with_state(state.clone(), auth_gate));
 
+    // Own body cap: upload_file carries a base64 file. The 2 MiB API cap would
+    // reject it before the handler.
+    let mcp_routes = Router::new()
+        .route(
+            "/api/mcp",
+            post(mcp::mcp_http).get(mcp::mcp_http).delete(mcp::mcp_http),
+        )
+        .layer(DefaultBodyLimit::max(mcp::BODY_LIMIT))
+        .layer(from_fn_with_state(state.clone(), auth_gate));
+
+    // Outside `/api` so the session gate does not answer before the consent page.
+    // The handler checks the session itself and refuses every account except the
+    // owner of PAPERRUST_MCP_API_TOKEN.
+    let oauth_routes = Router::new()
+        .route(
+            "/oauth/authorize",
+            get(mcp_oauth::authorize).post(mcp_oauth::authorize_submit),
+        )
+        .route("/oauth/token", post(mcp_oauth::token))
+        .route("/oauth/register", post(mcp_oauth::register))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(mcp_oauth::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource/api/mcp",
+            get(mcp_oauth::protected_resource),
+        )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(mcp_oauth::authorization_server),
+        )
+        .layer(DefaultBodyLimit::max(8 * 1024));
+
     let app = Router::new()
         .merge(api_routes)
+        .merge(mcp_routes)
         .merge(upload_routes)
+        .merge(oauth_routes)
         .layer(cors)
         .with_state(state);
 
@@ -235,8 +305,8 @@ async fn main() -> anyhow::Result<()> {
         app
     };
 
-    // security headers on API + SPA/assets (outer layer after nest/fallback).
-    // refuse (400) a public Host from an untrusted peer; never remap it.
+    // SYN-29b: security headers on API + SPA/assets (outer layer after nest/fallback).
+    // Syn B2: refuse (400) a public Host from an untrusted peer; never remap it.
     let app = app.layer(from_fn(reject_untrusted_public_host));
     let app = app.layer(from_fn(security_headers));
 
@@ -481,8 +551,25 @@ async fn dashboard(State(state): State<AppState>, user: AuthUser) -> Result<Json
 async fn query_documents(
     State(state): State<AppState>,
     user: AuthUser,
-    Json(filter): Json<DocumentFilter>,
+    read_token: Option<Extension<auth::ReadTokenScope>>,
+    Json(mut filter): Json<DocumentFilter>,
 ) -> Result<Json<Vec<DocumentListItem>>, AppError> {
+    // A bot token pages and skips SVG thumbnails unless it asks for them.
+    // Browser sessions omit the marker, so their query stays unchanged.
+    if read_token.is_some() {
+        filter.limit = Some(
+            filter
+                .limit
+                .unwrap_or(api_tokens::READ_PAGE_DEFAULT)
+                .clamp(1, api_tokens::READ_PAGE_MAX),
+        );
+        if let Some(offset) = filter.offset {
+            filter.offset = Some(offset.clamp(0, 1_000_000));
+        }
+        if filter.include_thumbnails.is_none() {
+            filter.include_thumbnails = Some(false);
+        }
+    }
     Ok(Json(queries::list_documents(&state.pool, &filter, user.id).await?))
 }
 
@@ -494,13 +581,14 @@ struct SearchQ {
 async fn search(
     State(state): State<AppState>,
     user: AuthUser,
+    read_token: Option<Extension<auth::ReadTokenScope>>,
     Query(q): Query<SearchQ>,
 ) -> Result<Json<Vec<DocumentListItem>>, AppError> {
     let q = q.q.unwrap_or_default();
     if q.trim().is_empty() {
         return Ok(Json(vec![]));
     }
-    let rows = queries::list_documents_limited(
+    let mut rows = queries::list_documents_limited(
         &state.pool,
         &DocumentFilter {
             q: Some(q),
@@ -511,16 +599,29 @@ async fn search(
         Some(12),
     )
     .await?;
+    if read_token.is_some() {
+        for row in &mut rows {
+            row.thumbnail_svg = None;
+        }
+    }
     Ok(Json(rows))
 }
 
 async fn document(
     State(state): State<AppState>,
     user: AuthUser,
+    read_token: Option<Extension<auth::ReadTokenScope>>,
     Path(id): Path<i32>,
 ) -> Result<Response, AppError> {
     match queries::get_document(&state.pool, id, user.id).await? {
-        Some(doc) => Ok(Json(doc).into_response()),
+        Some(mut doc) => {
+            if read_token.is_some() {
+                // Text stays in `content`. Original bytes stay on `/file`.
+                doc.item.thumbnail_svg = None;
+                doc.file_data = None;
+            }
+            Ok(Json(doc).into_response())
+        }
         None => Ok(not_found_json()),
     }
 }
@@ -767,16 +868,22 @@ async fn file_original(
     Ok(res)
 }
 
-/// production origins + explicit Vite ports only.
+/// SYN-44: production origins + explicit Vite ports only.
 /// Arbitrary `localhost:<any>` is refused unless `PAPERRUST_DEV=1`.
 /// Vite loopback origins are refused when `PAPERRUST_ENV=production`.
 fn cors_origin_allowed(origin: &HeaderValue) -> bool {
     let Ok(s) = origin.to_str() else {
         return false;
     };
-    // Stirling origins are not global (develop/#56). CORS for the edit file is
-    // applied only on GET /api/edit/stirling/{token}/file, without credentials.
-    // App origins come from PAPERRUST_CORS_ORIGINS (!53), no hostnames in code.
+    if s.contains("grok.me") || s.contains("grok-sandbox.com") {
+        return false;
+    }
+    // Stirling edit bridge fetches signed /api/edit/stirling/.../file cross-origin.
+    // CorsLayer owns OPTIONS preflight — must allow these or browser sees ACA-Credentials
+    // without ACAO. Tight exact-host list via stirling_edit::is_allowed_stirling_origin.
+    if crate::stirling_edit::is_allowed_stirling_origin(s) {
+        return true;
+    }
     if instance::cors_origin_listed(s) {
         return true;
     }
@@ -808,7 +915,7 @@ async fn paperless_import_start(
     user: AuthUser,
     Json(body): Json<crate::paperless_import::StartImportRequest>,
 ) -> Response {
-    // per-user start rate-limit (in addition to 409 one-active-job).
+    // SYN-74: per-user start rate-limit (in addition to 409 one-active-job).
     if !rate_limit_ok(&format!("plimport:{}", user.id), 5, 60) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -872,8 +979,9 @@ mod cors_origin_tests {
         assert!(directives.contains(&"connect-src 'self'"));
         assert!(directives.contains(&"script-src 'self' 'nonce-abc123'"));
         assert!(directives.contains(&"object-src 'none'"));
-        // No third-party origin anywhere (no external script host, no Google Fonts, no CDN).
+        // No third-party origin anywhere (no grok.com, no Google Fonts, no CDN).
         assert!(!csp.contains("http:") && !csp.contains("https:"), "{csp}");
+        assert!(!csp.contains("grok"), "{csp}");
         assert!(!csp.contains("googleapis") && !csp.contains("gstatic"), "{csp}");
         assert!(!csp.contains("unsafe-eval"), "{csp}");
     }
@@ -901,7 +1009,7 @@ mod cors_origin_tests {
         assert!(!csp.contains("unsafe-eval"), "{csp}");
     }
 
-    /// Every response (index, SPA fallback, 404/500 HTML error pages,
+    /// Syn C1/C2: every response (index, SPA fallback, 404/500 HTML error pages,
     /// API JSON) carries the CSP; nonces differ per request and match the
     /// `nonce=` injected into the HTML.
     #[tokio::test]
@@ -1136,7 +1244,7 @@ fn resolve_ui_dir() -> PathBuf {
 }
 
 
-/// fresh 256-bit nonce from the OS CSPRNG on every response; never
+/// Syn C1: fresh 256-bit nonce from the OS CSPRNG on every response; never
 /// cached or reused (called inside `security_headers`, once per request).
 fn csp_nonce() -> String {
     use base64::Engine;
@@ -1148,7 +1256,7 @@ fn csp_nonce() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf)
 }
 
-/// Inject `nonce="…"` on every `<script` opening tag that lacks one.
+/// Inject `nonce="…"` on every `<script` opening tag that lacks one (SYN-63).
 fn inject_script_nonces(html: &str, nonce: &str) -> String {
     let mut out = String::with_capacity(html.len() + 128);
     let lower = html.to_ascii_lowercase();
@@ -1178,11 +1286,12 @@ fn inject_script_nonces(html: &str, nonce: &str) -> String {
 /// HTTPS for HSTS and the `Secure` cookie flag.
 /// An origin listed in `PAPERRUST_PUBLIC_URLS` follows that URL's scheme.
 /// Any other non-loopback host defaults to HTTPS. Loopback stays cleartext.
+#[cfg(test)]
 fn host_implies_https(name: &str) -> bool {
     instance::host_implies_https(name)
 }
 
-/// strict CSP, no third-party origin at all. Fonts are self-hosted
+/// Syn E2: strict CSP, no third-party origin at all. Fonts are self-hosted
 /// (`/fonts`, #58), no external script (E1). OIDC login/logout and the Stirling
 /// editor are top-level navigations / popups, not fetches, so `connect-src`
 /// stays `'self'`.
@@ -1193,7 +1302,7 @@ fn content_security_policy(nonce: &str) -> String {
 }
 
 async fn security_headers(req: Request, next: Next) -> Response {
-    // Baseline browser isolation + per-response CSP nonce.
+    // SYN-29 / SYN-63: baseline browser isolation + per-response CSP nonce.
     // HSTS: never trust X-Forwarded-Proto unless TCP peer is trusted (same as XFH).
     let peer = connect_peer(&req);
     let host = auth::request_host(req.headers(), peer);
@@ -1213,7 +1322,7 @@ async fn security_headers(req: Request, next: Next) -> Response {
     // HTTPS when the matched public URL is https, or for any non-loopback host
     // when no listed origin matches (instance).
     let name = auth::host_name(&host);
-    let host_implies_https = host_implies_https(&name) || instance::host_implies_https(&name);
+    let host_implies_https = instance::host_implies_https(&name);
     let https = req.uri().scheme_str() == Some("https") || host_implies_https || xfp_https;
     let nonce = csp_nonce();
     let csp = content_security_policy(&nonce);
@@ -1310,7 +1419,7 @@ async fn spa_fallback_html_routes_only(req: Request, next: Next) -> Response {
     }
 }
 
-/// PWA (GH#2): the service worker script and the manifest must
+/// PWA (GH#2 port, Syn W2): the service worker script and the manifest must
 /// always be revalidated so a fixed/removed SW is picked up immediately.
 /// Exact paths only.
 fn pwa_no_cache_path(path: &str) -> bool {
@@ -1352,8 +1461,41 @@ async fn no_store_html(req: Request, next: Next) -> Response {
     res
 }
 
+#[derive(Deserialize)]
+struct ChecksumLookupBody {
+    sha256: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChecksumLookupResponse {
+    duplicate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    document_id: Option<i32>,
+}
+
+async fn checksum_lookup(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<ChecksumLookupBody>,
+) -> Result<Json<ChecksumLookupResponse>, AppError> {
+    if !rate_limit_ok(&format!("checksum:{}", user.id), 600, 60) {
+        return Err(anyhow::anyhow!("rate limited").into());
+    }
+    let Some(checksum) = consume::checksum_from_sha256_hex(&body.sha256) else {
+        return Err(anyhow::anyhow!("hash invalide").into());
+    };
+    let document_id =
+        consume::find_active_document_by_checksum(&state.pool, user.id, &checksum).await?;
+    Ok(Json(ChecksumLookupResponse {
+        duplicate: document_id.is_some(),
+        document_id,
+    }))
+}
+
 async fn consume(State(state): State<AppState>, user: AuthUser, req: Request) -> Result<Json<ConsumeResult>, AppError> {
-    if !rate_limit_ok(&format!("consume:{}", user.id), 30, 60) {
+    // One file per request. A folder drop must not stop after 30 files in a minute.
+    if !rate_limit_ok(&format!("consume:{}", user.id), 300, 60) {
         return Err(anyhow::anyhow!("rate limited").into());
     }
     let input = consume_input_from_request(&state, req).await?;
@@ -1373,7 +1515,7 @@ async fn consume_input_from_request(state: &AppState, req: Request) -> Result<Co
         let Json(mut input) = Json::<ConsumeInput>::from_request(req, state)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        // JSON consume must not override the OCR endpoint or inject keys.
+        // SYN-53 / SYN-64: JSON consume must not override OCR endpoint or inject keys.
         input.base_url = None;
         input.api_key = None;
         Ok(input)
@@ -1446,7 +1588,7 @@ async fn parse_consume_multipart(state: &AppState, req: Request) -> Result<Consu
                 let t = field.text().await.map_err(|e| anyhow::anyhow!("{e}"))?;
                 skip_ocr = Some(t == "1" || t.eq_ignore_ascii_case("true"));
             }
-            // ignore consume `baseUrl` — selfhosted OCR endpoint comes from
+            // SYN-64: ignore consume `baseUrl` — selfhosted OCR endpoint comes from
             // settings (`ocrBaseUrl`) only. Still drain the field so multipart parses.
             "baseUrl" | "base_url" => {
                 let _ = field.text().await.map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -1494,30 +1636,40 @@ async fn parse_consume_multipart(state: &AppState, req: Request) -> Result<Consu
     })
 }
 
-async fn meta(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Path(id): Path<i32>,
-    Json(mut data): Json<MetaUpdate>,
-) -> Result<Response, AppError> {
-    if !auth::document_owned(&state.pool, id, user.id).await? {
-        return Ok(not_found_json());
+pub(crate) enum MetaWrite {
+    NotFound,
+    ContentRejected,
+    Saved(DocumentDetail),
+}
+
+pub(crate) async fn write_document_meta(
+    pool: &PgPool,
+    owner_id: i32,
+    id: i32,
+    mut data: MetaUpdate,
+    reject_content: bool,
+) -> anyhow::Result<MetaWrite> {
+    if !auth::document_owned(pool, id, owner_id).await? {
+        return Ok(MetaWrite::NotFound);
+    }
+    if api_tokens::token_meta_blocks_content(reject_content, data.content.is_some()) {
+        return Ok(MetaWrite::ContentRejected);
     }
     data.id = id;
-    // FK targets must belong to the same owner (null = clear is allowed).
+    // SYN-27: FK targets must belong to the same owner (null = clear is allowed).
     if let Some(Some(cid)) = data.correspondent_id {
-        if !auth::correspondent_owned(&state.pool, cid, user.id).await? {
-            return Ok(not_found_json());
+        if !auth::correspondent_owned(pool, cid, owner_id).await? {
+            return Ok(MetaWrite::NotFound);
         }
     }
     if let Some(Some(tid)) = data.document_type_id {
-        if !auth::type_owned(&state.pool, tid, user.id).await? {
-            return Ok(not_found_json());
+        if !auth::type_owned(pool, tid, owner_id).await? {
+            return Ok(MetaWrite::NotFound);
         }
     }
     if let Some(Some(pid)) = data.storage_path_id {
-        if !auth::path_owned(&state.pool, pid, user.id).await? {
-            return Ok(not_found_json());
+        if !auth::path_owned(pool, pid, owner_id).await? {
+            return Ok(MetaWrite::NotFound);
         }
     }
     let corr_set = data.correspondent_id.is_some();
@@ -1553,13 +1705,13 @@ async fn meta(
     .bind(path_set)
     .bind(date_set)
     .bind(asn_set)
-    .bind(user.id)
-    .execute(&state.pool)
+    .bind(owner_id)
+    .execute(pool)
     .await?;
     if let Some(tag_ids) = &data.tag_ids {
         sqlx::query("delete from document_tags where document_id = $1")
             .bind(id)
-            .execute(&state.pool)
+            .execute(pool)
             .await?;
         for tag_id in tag_ids {
             sqlx::query(
@@ -1569,21 +1721,21 @@ async fn meta(
             )
             .bind(id)
             .bind(*tag_id)
-            .bind(user.id)
-            .execute(&state.pool)
+            .bind(owner_id)
+            .execute(pool)
             .await?;
         }
     }
     if let Some(cvs) = &data.custom_values {
         for cv in cvs {
-            if !auth::field_owned(&state.pool, cv.field_id, user.id).await? {
-                return Ok(not_found_json());
+            if !auth::field_owned(pool, cv.field_id, owner_id).await? {
+                return Ok(MetaWrite::NotFound);
             }
             if cv.value.as_deref().unwrap_or("").is_empty() {
                 sqlx::query("delete from document_custom_values where document_id = $1 and field_id = $2")
                     .bind(id)
                     .bind(cv.field_id)
-                    .execute(&state.pool)
+                    .execute(pool)
                     .await?;
             } else {
                 sqlx::query(
@@ -1595,14 +1747,168 @@ async fn meta(
                 .bind(id)
                 .bind(cv.field_id)
                 .bind(&cv.value)
-                .bind(user.id)
-                .execute(&state.pool)
+                .bind(owner_id)
+                .execute(pool)
                 .await?;
             }
         }
     }
-    queries::log_audit(&state.pool, id, "updated", Some("Métadonnées")).await?;
-    Ok(Json(queries::get_document(&state.pool, id, user.id).await?).into_response())
+    queries::log_audit(pool, id, "updated", Some("Métadonnées")).await?;
+    match queries::get_document(pool, id, owner_id).await? {
+        Some(doc) => Ok(MetaWrite::Saved(doc)),
+        None => Ok(MetaWrite::NotFound),
+    }
+}
+
+async fn meta(
+    State(state): State<AppState>,
+    user: AuthUser,
+    meta_token: Option<Extension<auth::MetaTokenScope>>,
+    Path(id): Path<i32>,
+    Json(data): Json<MetaUpdate>,
+) -> Result<Response, AppError> {
+    match write_document_meta(&state.pool, user.id, id, data, meta_token.is_some()).await? {
+        MetaWrite::NotFound => Ok(not_found_json()),
+        MetaWrite::ContentRejected => Ok((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "content_not_writable"})),
+        )
+            .into_response()),
+        MetaWrite::Saved(doc) => Ok(Json(doc).into_response()),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TextWindowQuery {
+    #[serde(default)]
+    offset: Option<i32>,
+    #[serde(default)]
+    max_chars: Option<i32>,
+}
+
+fn text_window_body(content: &str, offset: Option<i32>, max_chars: Option<i32>, page_count: i32) -> serde_json::Value {
+    let window = queries::text_window(
+        content,
+        offset.unwrap_or(0),
+        max_chars.unwrap_or(queries::TEXT_WINDOW_DEFAULT),
+    );
+    serde_json::json!({
+        "text": window.text,
+        "offset": window.offset,
+        "nextOffset": window.next_offset,
+        "truncated": window.truncated,
+        "totalChars": window.total_chars,
+        "pageCount": page_count,
+    })
+}
+
+async fn document_text(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i32>,
+    Query(q): Query<TextWindowQuery>,
+) -> Result<Response, AppError> {
+    let Some(doc) = queries::get_document(&state.pool, id, user.id).await? else {
+        return Ok(not_found_json());
+    };
+    Ok(Json(text_window_body(
+        &doc.item.content,
+        q.offset,
+        q.max_chars,
+        doc.item.page_count,
+    ))
+    .into_response())
+}
+
+async fn document_page_text(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((id, page)): Path<(i32, i32)>,
+    Query(q): Query<TextWindowQuery>,
+) -> Result<Response, AppError> {
+    if page < 1 || page > crate::preview::MAX_PAGES {
+        return Ok(not_found_json());
+    }
+    let Some(doc) = queries::get_document(&state.pool, id, user.id).await? else {
+        return Ok(not_found_json());
+    };
+    if let Some(orig) = crate::preview::load_original(&state.pool, id, user.id).await? {
+        if let Some(bytes) = orig.bytes.clone() {
+            if crate::preview::is_pdf(&orig.mime_type, &bytes) {
+                let mime = orig.mime_type.clone();
+                let extracted = crate::limits::run_heavy_blocking(
+                    std::time::Duration::from_secs(20),
+                    move || crate::preview::page_text(&bytes, &mime, page),
+                )
+                .await;
+                match extracted {
+                    Ok(text) => {
+                        let mut body = text_window_body(&text, q.offset, q.max_chars, doc.item.page_count);
+                        if let Some(obj) = body.as_object_mut() {
+                            obj.insert("source".into(), serde_json::json!("pdf"));
+                            if text.trim().is_empty() {
+                                let excerpt = queries::text_window(&doc.item.content, 0, 480);
+                                obj.insert("ocrExcerpt".into(), serde_json::json!(excerpt.text));
+                            }
+                        }
+                        return Ok(Json(body).into_response());
+                    }
+                    Err(err) => {
+                        let msg = err.to_string();
+                        if msg.contains("out of range") {
+                            return Ok(not_found_json());
+                        }
+                        let scrubbed = diagnostics::scrub(&msg);
+                        tracing::warn!(owner_id = user.id, "page text failed: {scrubbed}");
+                        return Ok((
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            Json(serde_json::json!({"error": "page_text_unavailable"})),
+                        )
+                            .into_response());
+                    }
+                }
+            }
+        }
+    }
+    if page != 1 {
+        return Ok(not_found_json());
+    }
+    let mut body = text_window_body(&doc.item.content, q.offset, q.max_chars, doc.item.page_count);
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("source".into(), serde_json::json!("ocr"));
+    }
+    Ok(Json(body).into_response())
+}
+
+#[derive(Deserialize)]
+struct DiagQuery {
+    level: Option<String>,
+    limit: Option<i32>,
+}
+
+async fn diagnostics_log(
+    user: AuthUser,
+    diag_token: Option<Extension<auth::DiagTokenScope>>,
+    Query(q): Query<DiagQuery>,
+) -> Result<Response, AppError> {
+    if diag_token.is_none()
+        && !rate_limit_ok(
+            &format!("botdiag:user:{}", user.id),
+            api_tokens::DIAG_RATE_MAX,
+            api_tokens::READ_RATE_WINDOW_SECS,
+        )
+    {
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "rate_limited"})),
+        )
+            .into_response());
+    }
+    let level = q.level.unwrap_or_else(|| "warn".into());
+    let limit = q.limit.unwrap_or(30).clamp(1, 100) as usize;
+    let events = diagnostics::recent(user.id, &level, limit);
+    Ok(Json(serde_json::json!({"events": events})).into_response())
 }
 
 /// Ingest tokens may soft-delete the documents they just created. They cannot
@@ -1781,18 +2087,17 @@ async fn stirling_session_file(
         )
             .into_response();
     }
-    let method = req.method().clone();
-    let method_is_head = method == Method::HEAD;
+    let method_is_head = *req.method() == Method::HEAD;
     let headers = req.headers().clone();
     let mut res = stirling_edit::serve_session_file(&state.pool, &token, method_is_head).await;
-    stirling_edit::apply_stirling_file_cors(&method, &headers, &mut res);
+    stirling_edit::apply_stirling_file_cors(&headers, &mut res);
     res
 }
 
 async fn stirling_session_file_options(headers: HeaderMap) -> Response {
     let mut res = StatusCode::NO_CONTENT.into_response();
-    // Preflight is not a GET: no CORS headers (the file response carries them).
-    stirling_edit::apply_stirling_file_cors(&Method::OPTIONS, &headers, &mut res);
+    // Production allowlist: a known Stirling origin only. Never `*`.
+    stirling_edit::apply_stirling_file_cors(&headers, &mut res);
     res
 }
 
@@ -2475,7 +2780,7 @@ async fn save_settings(
     user: AuthUser,
     Json(data): Json<SettingsInput>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    // active OCR provider must be a consume allowlist entry (not kimi/mistral).
+    // SYN-72: active OCR provider must be a consume allowlist entry (not kimi/mistral).
     let provider = llm_keys::normalize_consume_provider(&data.ocr_provider)
         .unwrap_or("xai")
         .to_string();
@@ -2538,6 +2843,9 @@ async fn save_settings(
 struct CreateApiTokenBody {
     #[serde(default)]
     name: Option<String>,
+    /// Absent → `ingest` only, same as tokens created before read scopes existed.
+    #[serde(default)]
+    scopes: Option<Vec<String>>,
 }
 
 async fn list_api_tokens(
@@ -2557,12 +2865,17 @@ async fn create_api_token(
         return Err(anyhow::anyhow!("Trop de créations de tokens — réessayez dans une minute.").into());
     }
     let name = body.name.unwrap_or_default();
-    let created = api_tokens::create_token(&state.pool, user.id, &name).await?;
+    let scopes = match api_tokens::normalize_scopes(body.scopes) {
+        Ok(scopes) => scopes,
+        Err(msg) => return Err(anyhow::anyhow!(msg).into()),
+    };
+    let created = api_tokens::create_token(&state.pool, user.id, &name, &scopes).await?;
     Ok(Json(serde_json::json!({
         "ok": true,
         "id": created.id,
         "name": created.name,
         "prefix": created.prefix,
+        "scopes": created.scopes,
         "token": created.token,
         "createdAt": created.created_at,
     })))
@@ -2599,7 +2912,18 @@ async fn ingest_v1(State(state): State<AppState>, req: Request) -> Response {
         }
     };
     let auth = match api_tokens::authenticate(&state.pool, &bearer).await {
-        Ok(Some(pair)) => pair,
+        Ok(Some(principal)) if principal.allows(api_tokens::SCOPE_INGEST) => principal,
+        Ok(Some(_)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": "insufficient_scope",
+                    "required": api_tokens::SCOPE_INGEST
+                })),
+            )
+                .into_response();
+        }
         Ok(None) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -2622,7 +2946,8 @@ async fn ingest_v1(State(state): State<AppState>, req: Request) -> Response {
                 .into_response();
         }
     };
-    let (token_id, owner_id) = auth;
+    let token_id = auth.id;
+    let owner_id = auth.owner_id;
     if !rate_limit_ok(&format!("ingest:{token_id}"), 30, 60) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -2706,7 +3031,16 @@ async fn post_document_ngx(State(state): State<AppState>, req: Request) -> Respo
         }
     };
     let auth = match api_tokens::authenticate(&state.pool, &raw).await {
-        Ok(Some(pair)) => pair,
+        Ok(Some(principal)) if principal.allows(api_tokens::SCOPE_INGEST) => principal,
+        Ok(Some(_)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({
+                    "detail": "Insufficient token scope."
+                })),
+            )
+                .into_response();
+        }
         Ok(None) => {
             return (
                 StatusCode::UNAUTHORIZED,
@@ -2725,7 +3059,8 @@ async fn post_document_ngx(State(state): State<AppState>, req: Request) -> Respo
                 .into_response();
         }
     };
-    let (token_id, owner_id) = auth;
+    let token_id = auth.id;
+    let owner_id = auth.owner_id;
     if !rate_limit_ok(&format!("ingest:{token_id}"), 30, 60) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -2829,10 +3164,50 @@ async fn reject_untrusted_public_host(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+enum AdmitMarker {
+    Read,
+    Meta,
+    Diag,
+}
+
+async fn admit_token(
+    state: &AppState,
+    mut req: Request,
+    next: Next,
+    owner_id: i32,
+    rate_key: &str,
+    rate_max: u32,
+    marker: AdmitMarker,
+) -> Response {
+    if !rate_limit_ok(rate_key, rate_max, api_tokens::READ_RATE_WINDOW_SECS) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "rate_limited"})),
+        )
+            .into_response();
+    }
+    let Some(user) = auth::user_by_id(&state.pool, owner_id).await else {
+        return auth::unauthorized();
+    };
+    match marker {
+        AdmitMarker::Read => {
+            req.extensions_mut().insert(auth::ReadTokenScope);
+        }
+        AdmitMarker::Meta => {
+            req.extensions_mut().insert(auth::MetaTokenScope);
+        }
+        AdmitMarker::Diag => {
+            req.extensions_mut().insert(auth::DiagTokenScope);
+        }
+    }
+    req.extensions_mut().insert(user);
+    next.run(req).await
+}
+
 async fn auth_gate(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let peer = connect_peer(&req);
-    // cookie-auth mutations (incl. public logout) need same-origin CSRF.
+    // SYN-61: cookie-auth mutations (incl. public logout) need same-origin CSRF.
     if path.starts_with("/api") && !auth::csrf_ok(req.headers(), peer, req.method()) {
         return auth::csrf_forbidden();
     }
@@ -2844,17 +3219,88 @@ async fn auth_gate(State(state): State<AppState>, mut req: Request, next: Next) 
             req.extensions_mut().insert(user);
             next.run(req).await
         }
-        // Smoke cleanup: the same `pr_` ingest token may soft-delete by id.
-        None if path == "/api/documents/bulk" && *req.method() == Method::POST => {
-            if let Some(user) = auth::user_from_ingest_token(&state.pool, req.headers()).await {
-                req.extensions_mut().insert(auth::IngestTokenScope);
-                req.extensions_mut().insert(user);
-                next.run(req).await
-            } else {
+        None => match api_tokens::presented_token(&state.pool, req.headers()).await {
+            Ok(api_tokens::PresentedToken::NotPersonal | api_tokens::PresentedToken::Invalid) => {
                 auth::unauthorized()
             }
-        }
-        None => auth::unauthorized(),
+            Err(e) => {
+                tracing::error!("api token lookup: {e:#}");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "server_error"})),
+                )
+                    .into_response()
+            }
+            Ok(api_tokens::PresentedToken::Valid(principal)) => {
+                let method = req.method().clone();
+                if api_tokens::is_documents_meta_request(&method, &path)
+                    && principal.allows(api_tokens::SCOPE_DOCUMENTS_META)
+                {
+                    return admit_token(
+                        &state,
+                        req,
+                        next,
+                        principal.owner_id,
+                        &format!("botmeta:{}", principal.id),
+                        api_tokens::META_RATE_MAX,
+                        AdmitMarker::Meta,
+                    )
+                    .await;
+                }
+                if api_tokens::is_diagnostics_request(&method, &path)
+                    && principal.allows(api_tokens::SCOPE_DIAGNOSTICS_READ)
+                {
+                    return admit_token(
+                        &state,
+                        req,
+                        next,
+                        principal.owner_id,
+                        &format!("botdiag:{}", principal.id),
+                        api_tokens::DIAG_RATE_MAX,
+                        AdmitMarker::Diag,
+                    )
+                    .await;
+                }
+                if api_tokens::is_documents_read_request(&method, &path)
+                    && principal.allows(api_tokens::SCOPE_DOCUMENTS_READ)
+                {
+                    return admit_token(
+                        &state,
+                        req,
+                        next,
+                        principal.owner_id,
+                        &format!("botread:{}", principal.id),
+                        api_tokens::READ_RATE_MAX,
+                        AdmitMarker::Read,
+                    )
+                    .await;
+                }
+                // Smoke cleanup: an ingest token may soft-delete owned ids.
+                // The handler still rejects retag, restore, and purge.
+                if path == "/api/documents/bulk"
+                    && method == Method::POST
+                    && principal.allows(api_tokens::SCOPE_INGEST)
+                {
+                    let Some(user) = auth::user_by_id(&state.pool, principal.owner_id).await else {
+                        return auth::unauthorized();
+                    };
+                    req.extensions_mut().insert(auth::IngestTokenScope);
+                    req.extensions_mut().insert(user);
+                    return next.run(req).await;
+                }
+                let required = api_tokens::required_scope(&method, &path);
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(match required {
+                        Some(scope) => {
+                            serde_json::json!({"error": "insufficient_scope", "required": scope})
+                        }
+                        None => serde_json::json!({"error": "insufficient_scope"}),
+                    }),
+                )
+                    .into_response()
+            }
+        },
     }
 }
 
@@ -2876,7 +3322,7 @@ fn client_ip(headers: &axum::http::HeaderMap, peer: Option<IpAddr>) -> String {
     peer.map(|p| p.to_string()).unwrap_or_else(|| "0.0.0.0".to_string())
 }
 
-fn rate_limit_ok(key: &str, max: u32, window_secs: u64) -> bool {
+pub(crate) fn rate_limit_ok(key: &str, max: u32, window_secs: u64) -> bool {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2982,7 +3428,7 @@ async fn me(user: AuthUser) -> Json<serde_json::Value> {
     }))
 }
 
-/// The explicit LAN split, end to end through the real
+/// Syn L2 (!60): the explicit LAN split, end to end through the real
 /// `reject_untrusted_public_host` layer, with the TCP peer forced per case.
 /// Placeholder hosts: `beta.archive.lan` stands for the LAN origin behind
 /// ingress-nginx, `archive.example` for the public origin behind the tunnel.

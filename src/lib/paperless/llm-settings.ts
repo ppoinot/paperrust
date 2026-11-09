@@ -127,9 +127,9 @@ export function providerSelectLabel(provider: LlmProvider): string {
   return providerLabel(provider);
 }
 
-/** Dropzone / status line: `OCR via SpaceXAi · max. 300 Mo` */
+/** Dropzone / status line: `OCR via SpaceXAi · max. 100 Mo` */
 export function ocrViaHint(provider: LlmProvider): string {
-  return `OCR via ${providerLabel(provider)} · max. 300 Mo`;
+  return `OCR via ${providerLabel(provider)} · max. 100 Mo`;
 }
 
 export function keyPlaceholder(_provider: LlmProvider, hasKey: boolean): string {

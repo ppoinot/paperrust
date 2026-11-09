@@ -193,6 +193,16 @@ pub struct DocumentFilter {
     pub view_id: Option<i32>,
     pub sort: Option<String>,
     pub sort_reverse: Option<bool>,
+    /// Page size for `POST /api/documents/query`. Omitted = no SQL limit
+    /// (browser). A read token defaults this to 50 and never exceeds 100.
+    #[serde(default)]
+    pub limit: Option<i32>,
+    /// Rows to skip. Meaningful with `limit`.
+    #[serde(default)]
+    pub offset: Option<i32>,
+    /// `false` drops `thumbnailSvg` from the list JSON. Omitted keeps it.
+    #[serde(default)]
+    pub include_thumbnails: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,7 +385,7 @@ pub struct ConsumeInput {
     pub provider: String,
     pub api_key: Option<String>,
     pub skip_ocr: Option<bool>,
-    /// Ignored (). Selfhosted OCR base URL is settings-only (`ocrBaseUrl`).
+    /// Ignored (SYN-64). Selfhosted OCR base URL is settings-only (`ocrBaseUrl`).
     #[serde(default)]
     pub base_url: Option<String>,
     /// Optional title override (ngx `post_document` / clients).
@@ -394,6 +404,9 @@ pub struct ConsumeResult {
     pub used_llm: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// True when these bytes already exist for this owner, outside the trash.
+    #[serde(default)]
+    pub duplicate: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -628,7 +641,7 @@ static RE_SVG_ON_ATTR: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r#"(?i)(?:^|[\s>'"/])on[a-z0-9_-]+\s*="#).expect("svg on* attr regex")
 });
 
-/// Thumbnail-only SVG gate. **Not** a general XSS sanitizer — refuses active
+/// Thumbnail-only SVG gate (SYN-60). **Not** a general XSS sanitizer — refuses active
 /// content (`<script`, `javascript:`, `on*=`, `foreignObject`, `iframe`, `<use`, `xlink:href`)
 /// and optionally strips presentation-only `defs` / grain rects.
 pub fn sanitize_svg(svg: Option<String>) -> Option<String> {
@@ -694,7 +707,7 @@ pub const DOC_SELECT: &str = r#"
 "#;
 
 /// Org-env OCR readiness for catalogue only.
-/// do not claim AI is ready from ambient env keys unless
+/// SYN nit: do not claim AI is ready from ambient env keys unless
 /// `PAPERRUST_LLM_ENV_FALLBACK=1` (same gate as bootstrap seed). Per-user
 /// readiness lives on settings (`hasKey` / `aiAvailable`).
 pub fn ai_available() -> bool {

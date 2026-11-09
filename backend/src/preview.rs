@@ -8,7 +8,7 @@ use sqlx::{PgPool, Row};
 pub const PREVIEW_MAX_WIDTH: u32 = 900;
 pub const JPEG_QUALITY: u8 = 70;
 pub const MAX_PAGES: i32 = 50;
-/// Tall phone/scan PNGs (e.g. 6k×12k) need headroom, but unbounded 90s stacks ().
+/// Tall phone/scan PNGs (e.g. 6k×12k) need headroom, but unbounded 90s stacks (SYN-49).
 pub const RENDER_TIMEOUT_SECS: u64 = 60;
 
 pub fn pdfium_library_path() -> Option<PathBuf> {
@@ -32,12 +32,11 @@ pub fn pdfium_library_path() -> Option<PathBuf> {
             }
         }
     }
-    candidates.push(PathBuf::from("/var/home/grok-agent/work/paperrust/lib/libpdfium.so"));
     candidates.push(PathBuf::from("lib/libpdfium.so"));
     candidates.into_iter().find(|p| p.is_file())
 }
 
-fn is_pdf(mime: &str, bytes: &[u8]) -> bool {
+pub(crate) fn is_pdf(mime: &str, bytes: &[u8]) -> bool {
     mime == "application/pdf"
         || mime.ends_with("/pdf")
         || bytes.starts_with(b"%PDF")
@@ -109,7 +108,7 @@ fn downscale(img: DynamicImage) -> DynamicImage {
 }
 
 fn render_image_bytes(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-    // bound decode dimensions / allocations (zip-bomb / decompression DoS).
+    // SYN-31: bound decode dimensions / allocations (zip-bomb / decompression DoS).
     // Allow tall A4 phone scans (~6k×12k ≈ 70 MP) then downscale to PREVIEW_MAX_WIDTH.
     const MAX_DIM: u32 = 20_000;
     const MAX_PIXELS: u64 = 120_000_000;
@@ -172,6 +171,29 @@ fn with_open_pdf<T>(
 
 fn render_pdf_page(bytes: &[u8], page_1based: i32) -> anyhow::Result<Vec<u8>> {
     with_open_pdf(bytes, |doc| render_pdf_page_in_doc(doc, page_1based))
+}
+
+/// Text of one PDF page. Does not return the file bytes. Out-of-range pages
+/// fail before the library is opened when the index itself is illegal.
+pub fn page_text(bytes: &[u8], mime: &str, page_1based: i32) -> anyhow::Result<String> {
+    if page_1based < 1 || page_1based > MAX_PAGES {
+        anyhow::bail!("page out of range");
+    }
+    if !is_pdf(mime, bytes) {
+        anyhow::bail!("not a pdf");
+    }
+    with_open_pdf(bytes, |doc| {
+        let n = i32::from(doc.pages().len());
+        if page_1based > n || n == 0 {
+            anyhow::bail!("page out of range");
+        }
+        let page = doc
+            .pages()
+            .get((page_1based as u16) - 1)
+            .map_err(|e| anyhow::anyhow!("pdf page: {e}"))?;
+        let text = page.text().map_err(|e| anyhow::anyhow!("pdf text: {e}"))?;
+        Ok(text.all())
+    })
 }
 
 fn pdf_page_count(bytes: &[u8]) -> anyhow::Result<i32> {
@@ -383,6 +405,66 @@ pub async fn load_original_meta(
     }))
 }
 
+/// One byte window of the stored original. `Ok(None)` is a missing document.
+/// `unavailable` is an empty original or an SVG, which is never served as the file.
+pub struct OriginalSlice {
+    pub mime_type: String,
+    pub original_filename: Option<String>,
+    pub page_count: i32,
+    pub byte_length: i64,
+    pub chunk: Vec<u8>,
+    pub unavailable: bool,
+}
+
+pub async fn load_original_slice(
+    pool: &PgPool,
+    id: i32,
+    owner_id: i32,
+    offset: i64,
+    len: i32,
+) -> sqlx::Result<Option<OriginalSlice>> {
+    let start = i32::try_from(offset.saturating_add(1)).unwrap_or(i32::MAX);
+    let len = len.clamp(0, 262_144);
+    let row = sqlx::query(
+        r#"select mime_type, original_filename, page_count,
+                  coalesce(octet_length(original_bytes), 0)::bigint as byte_length,
+                  substring(original_bytes from 1 for 512) as head,
+                  substring(original_bytes from $3::int for $4::int) as chunk
+           from documents where id = $1 and owner_id = $2"#,
+    )
+    .bind(id)
+    .bind(owner_id)
+    .bind(start)
+    .bind(len)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let mime_type: String = row.get("mime_type");
+    let original_filename: Option<String> = row.get("original_filename");
+    let page_count: i32 = row.get("page_count");
+    let byte_length: i64 = row.get("byte_length");
+    let head: Option<Vec<u8>> = row.get("head");
+    let chunk: Option<Vec<u8>> = row.get("chunk");
+    let head = head.unwrap_or_default();
+    let unavailable = byte_length <= 0
+        || mime_type.to_ascii_lowercase().contains("svg")
+        || looks_like_svg(&head);
+    Ok(Some(OriginalSlice {
+        mime_type,
+        original_filename,
+        page_count,
+        byte_length,
+        chunk: if unavailable {
+            Vec::new()
+        } else {
+            chunk.unwrap_or_default()
+        },
+        unavailable,
+    }))
+}
+
 pub async fn load_original(pool: &PgPool, id: i32, owner_id: i32) -> sqlx::Result<Option<OriginalDoc>> {
     // Native bytea — consume already binds/reads Vec<u8> successfully on pgrust.
     let row = sqlx::query(
@@ -443,6 +525,38 @@ pub async fn load_original(pool: &PgPool, id: i32, owner_id: i32) -> sqlx::Resul
         page_count: row.get("page_count"),
         bytes,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn page_text_rejects_out_of_range_without_echoing_bytes() {
+        let err = page_text(b"%PDF-1.4 secret-bytes", "application/pdf", 0).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("out of range"));
+        assert!(!msg.contains("secret-bytes"));
+        assert!(!msg.contains("%PDF"));
+        let err = page_text(b"%PDF-1.4", "application/pdf", MAX_PAGES + 1).unwrap_err();
+        assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn page_text_reads_one_page_when_pdfium_is_present() {
+        if pdfium_library_path().is_none() {
+            return;
+        }
+        let bytes = include_bytes!("../fixtures/bonjour.pdf");
+        let text = page_text(bytes, "application/pdf", 1).expect("page text");
+        assert!(text.contains("Bonjour"), "{text}");
+        assert!(!text.contains("%PDF"));
+        let err = page_text(bytes, "application/pdf", 2).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("out of range"));
+        assert!(!msg.contains("Bonjour"));
+        assert!(msg.len() < 200);
+    }
 }
 
 pub async fn cached_max_page(pool: &PgPool, id: i32) -> sqlx::Result<i32> {

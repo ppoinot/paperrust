@@ -1,5 +1,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   M365_EDIT_HINT_DISCONNECTED,
   STIRLING_APPLY_BANNER_HELP,
@@ -52,7 +55,13 @@ import {
   stirlingWindowNameForEdit,
   stirlingCommitApiPath,
   stirlingEditApiPath,
+  STIRLING_NOT_CONFIGURED,
+  isAcceptableStirlingUrl,
+  openStirlingTab,
+  stirlingConfiguredFrom,
   stirlingEditDisabledReason,
+  stirlingHrefHasSessionSecret,
+  stirlingPublicHref,
   toastForStirlingCommitFailure,
   toastForStirlingEditFailure,
   toastForStirlingEditStarted,
@@ -194,6 +203,73 @@ describe("Éditer / apply chrome (FR only)", () => {
       stirlingEditDisabledReason({ target: "m365", hasFile: true }),
       M365_EDIT_HINT_DISCONNECTED,
     );
+    assert.equal(
+      stirlingEditDisabledReason({ target: "stirling", hasFile: true, stirlingConfigured: false }),
+      STIRLING_NOT_CONFIGURED,
+    );
+    assert.equal(
+      stirlingEditDisabledReason({ target: "stirling", hasFile: true, stirlingConfigured: true }),
+      null,
+    );
+    assert.equal(stirlingConfiguredFrom("", ""), false);
+    assert.equal(stirlingConfiguredFrom("https://pdf.example", ""), true);
+    assert.equal(stirlingConfiguredFrom("", "https://pdf.example"), true);
+    assert.doesNotMatch(STIRLING_NOT_CONFIGURED, /himin/);
+  });
+
+  it("treats a non-https stirlingUrl like a missing one", () => {
+    const rejected = [
+      "",
+      "   ",
+      "javascript:alert(1)",
+      "data:text/html,x",
+      "blob:https://pdf.example/uuid",
+      "file:///tmp/a.pdf",
+      "ftp://files.example/a",
+      "/stirling",
+      "//evil.example",
+      "./stirling",
+      "stirling.example",
+      "http://pdf.example",
+      "http://127.0.0.1:8080",
+    ];
+    for (const raw of rejected) {
+      assert.equal(isAcceptableStirlingUrl(raw), false, raw);
+      assert.equal(stirlingConfiguredFrom(raw, ""), false, raw);
+      assert.equal(
+        stirlingEditDisabledReason({
+          target: "stirling",
+          hasFile: true,
+          stirlingConfigured: stirlingConfiguredFrom(raw, ""),
+        }),
+        STIRLING_NOT_CONFIGURED,
+        raw,
+      );
+    }
+    assert.equal(isAcceptableStirlingUrl("https://pdf.example/a"), true);
+    assert.equal(isAcceptableStirlingUrl("  HTTPS://PDF.Example/a  "), true);
+    assert.equal(isAcceptableStirlingUrl("http://pdf.example", { allowHttp: true }), true);
+    assert.equal(stirlingConfiguredFrom("http://localhost:8080", "", { allowHttp: true }), true);
+    assert.equal(stirlingConfiguredFrom("javascript:alert(1)", "https://pdf.example"), true);
+    assert.equal(stirlingConfiguredFrom("", "http://localhost:8080"), false);
+    assert.equal(stirlingConfiguredFrom("", "http://localhost:8080", { allowHttp: true }), true);
+    assert.equal(stirlingConfiguredFrom("", "javascript:alert(1)", { allowHttp: true }), false);
+  });
+
+  it("production dist folds devHttpAllowed() to false", (t) => {
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+    const assets = path.join(root, "dist/assets");
+    if (!existsSync(assets)) {
+      t.skip("dist/assets is created by npm run build");
+      return;
+    }
+    const files = readdirSync(assets).filter((name) => name.endsWith(".js"));
+    assert.ok(files.length >= 1, "expected at least one JS chunk in dist/assets");
+    for (const name of files) {
+      const src = readFileSync(path.join(assets, name), "utf8");
+      assert.equal(src.includes("import.meta.env"), false, name);
+      assert.doesNotMatch(src, /allowHttp\s*:\s*(?:!0|true)\b/, name);
+    }
   });
 });
 
@@ -621,42 +697,107 @@ describe("Stirling gesture popups", () => {
     assert.equal(openStirlingSourceFile("data:text/html,x"), false);
   });
 
-  it("openStirlingEditor blank → replace(origin+pathname); refuses incomplete session", () => {
-    let openedUrl = "";
-    withWindow((url) => {
-      openedUrl = url;
-      return fakePopup(url);
+  it("openStirlingEditor uses noopener on origin+pathname and refuses secrets", () => {
+    const token = "sid.exp.doc.uid.mac";
+    const sessionId = "session-id-42";
+    const source = `https://paperrust.example/api/edit/stirling/${token}/file`;
+    const commit = `https://paperrust.example/api/edit/stirling/${token}/commit`;
+    const editorUrl =
+      `https://stirling.example/edit?fileUrl=${encodeURIComponent(source)}` +
+      `&sessionId=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(token)}`;
+    const opened: { url?: string; target?: string; features?: string }[] = [];
+    withWindow((url, target, features) => {
+      opened.push({ url, target, features });
+      return null;
     }, () => {
-      const commit = "https://paperrust.example/api/edit/stirling/tok/commit";
-      const source = "https://paperrust.example/api/edit/stirling/tok/file";
       assert.equal(
         openStirlingEditor({
           editorUrl: "https://stirling.example",
           sourceFileUrl: "",
           commitUrl: commit,
+          token,
+          sessionId,
         }),
-        null,
+        false,
       );
       assert.equal(
         openStirlingEditor({
           editorUrl: "https://stirling.example/?",
           sourceFileUrl: source,
           commitUrl: "",
+          token,
+          sessionId,
         }),
-        null,
+        false,
       );
-      const popup = openStirlingEditor({
-        editorUrl: "https://stirling.example/?",
-        sourceFileUrl: source,
-        commitUrl: commit,
-      }) as unknown as FakePopup;
-      assert.equal(openedUrl, "about:blank");
-      assert.equal(popup.opener, null);
-      assert.equal(popup.replacedWith, expectedNavigateUrl(source));
-      assert.equal(popup.location.href, expectedNavigateUrl(source));
-      assert.equal(popup.name, expectedEditName(source, commit));
-      assert.doesNotMatch(popup.replacedWith ?? "", /commitUrl|[?#]/);
+      assert.equal(
+        openStirlingEditor({
+          editorUrl: "javascript:alert(1)",
+          sourceFileUrl: source,
+          commitUrl: commit,
+          token,
+          sessionId,
+        }),
+        false,
+      );
+      assert.equal(
+        openStirlingEditor({ editorUrl, sourceFileUrl: source, commitUrl: commit, token, sessionId }),
+        true,
+      );
     });
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0]?.url, "https://stirling.example/edit");
+    assert.equal(opened[0]?.target, "_blank");
+    assert.equal(opened[0]?.features, "noopener,noreferrer");
+    const href = opened[0]?.url ?? "";
+    assert.equal(href.includes(token), false);
+    assert.equal(href.toLowerCase().includes(sessionId.toLowerCase()), false);
+    assert.equal(href.includes("sessionId"), false);
+    assert.equal(href.includes("token="), false);
+    assert.doesNotMatch(href, /[?#]/);
+    assert.equal(stirlingPublicHref(editorUrl, [token, sessionId]), "https://stirling.example/edit");
+    assert.equal(stirlingPublicHref(`https://stirling.example/${token}`, [token]), null);
+    assert.equal(stirlingHrefHasSessionSecret("https://stirling.example/?token=abc"), true);
+    assert.equal(openStirlingTab(`https://stirling.example/?token=${token}`, [token]), false);
+    assert.equal(openStirlingTab("javascript:alert(1)"), false);
+    assert.equal(openStirlingTab("http://stirling.example/"), false);
+  });
+
+  it("uses a noreferrer link when window.open is unavailable", () => {
+    const clicks: FakeAnchor[] = [];
+    const prevWindow = (globalThis as { window?: unknown }).window;
+    const prevDocument = (globalThis as { document?: unknown }).document;
+    delete (globalThis as { window?: unknown }).window;
+    (globalThis as { document: unknown }).document = {
+      createElement(tag: string) {
+        assert.equal(tag, "a");
+        const el: FakeAnchor = {
+          target: "",
+          rel: "",
+          href: "",
+          click() {
+            clicks.push(el);
+          },
+          remove() {},
+        };
+        return el;
+      },
+      body: { appendChild() {} },
+    };
+    try {
+      assert.equal(openStirlingTab("https://stirling.example/edit"), true);
+      assert.equal(clicks.length, 1);
+      assert.equal(clicks[0]?.target, "_blank");
+      assert.equal(clicks[0]?.rel, "noopener noreferrer");
+      assert.equal(clicks[0]?.href, "https://stirling.example/edit");
+      assert.equal(clicks[0]?.href.includes("token"), false);
+      assert.equal(clicks[0]?.href.includes("session"), false);
+    } finally {
+      if (prevWindow === undefined) delete (globalThis as { window?: unknown }).window;
+      else (globalThis as { window: unknown }).window = prevWindow;
+      if (prevDocument === undefined) delete (globalThis as { document?: unknown }).document;
+      else (globalThis as { document: unknown }).document = prevDocument;
+    }
   });
 });
 

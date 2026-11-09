@@ -414,6 +414,10 @@ fn merge_filter(request: &DocumentFilter, view: &DocumentFilter, sort_field: &st
         sort: nonempty(&request.sort, &Some(sort_field.to_string()))
             .or_else(|| nonempty(&request.sort, &view.sort)),
         sort_reverse: request.sort_reverse.or(Some(sort_reverse)).or(view.sort_reverse),
+        // Paging and thumbnail shape belong to this request, not the saved view.
+        limit: request.limit.filter(|n| *n > 0),
+        offset: request.offset.filter(|n| *n > 0),
+        include_thumbnails: request.include_thumbnails,
     }
 }
 
@@ -449,6 +453,7 @@ pub async fn list_documents_limited(
     limit: Option<i32>,
 ) -> sqlx::Result<Vec<DocumentListItem>> {
     let filter = resolve_filter(pool, filter, owner_id).await?;
+    let hide_thumbnails = filter.include_thumbnails == Some(false);
     let sql = build_list_sql(&filter, owner_id, limit);
     let mut query = sqlx::query_as::<_, DocRow>(&sql.0);
     for b in sql.1 {
@@ -464,7 +469,11 @@ pub async fn list_documents_limited(
         .into_iter()
         .map(|r| {
             let tags = tag_map.get(&r.id).cloned().unwrap_or_default();
-            map_doc(r, tags)
+            let mut item = map_doc(r, tags);
+            if hide_thumbnails {
+                item.thumbnail_svg = None;
+            }
+            item
         })
         .collect())
 }
@@ -548,10 +557,20 @@ fn build_list_sql(filter: &DocumentFilter, owner_id: i32, limit: Option<i32>) ->
         DOC_SELECT,
         clauses.join(" and ")
     );
-    if let Some(lim) = limit {
+    let page = match limit {
+        Some(n) => Some(n.max(1)),
+        None => filter.limit.map(|n| n.clamp(1, 100)),
+    };
+    if let Some(lim) = page {
         n += 1;
         sql.push_str(&format!(" limit ${n}"));
         binds.push(Bind::I32(lim));
+    }
+    if let Some(off) = filter.offset.filter(|n| *n > 0) {
+        let off = off.min(1_000_000);
+        n += 1;
+        sql.push_str(&format!(" offset ${n}"));
+        binds.push(Bind::I32(off));
     }
     (sql, binds)
 }
@@ -595,7 +614,7 @@ pub async fn get_document(pool: &PgPool, id: i32, owner_id: i32) -> sqlx::Result
         created_at: n.get("created_at"),
     })
     .collect();
-    // never leak another tenant's field catalog via this document.
+    // SYN-26: never leak another tenant's field catalog via this document.
     let custom = sqlx::query(
         r#"select f.id as field_id, f.name, f.data_type, v.value
            from custom_fields f
@@ -807,7 +826,7 @@ pub async fn get_dashboard(pool: &PgPool, owner_id: i32) -> sqlx::Result<Dashboa
     })
 }
 
-/// next ASN under a per-owner advisory transaction lock (call inside a txn
+/// SYN-69: next ASN under a per-owner advisory transaction lock (call inside a txn
 /// that also inserts the document). Key namespace `0x50415253` ("PARS") + owner_id.
 pub async fn allocate_asn(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -825,6 +844,43 @@ pub async fn allocate_asn(
     .fetch_one(&mut **tx)
     .await?;
     Ok(n + 1)
+}
+
+/// Characters returned when a caller omits `maxChars` on a text window.
+pub const TEXT_WINDOW_DEFAULT: i32 = 8_000;
+/// Hard cap so a tool result stays under a 20 KB MCP limit after JSON framing.
+pub const TEXT_WINDOW_MAX: i32 = 12_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextWindow {
+    pub text: String,
+    pub offset: usize,
+    pub next_offset: Option<usize>,
+    pub truncated: bool,
+    pub total_chars: usize,
+}
+
+/// Slice `content` by Unicode scalar, not bytes. A non-positive `max_chars`
+/// uses [`TEXT_WINDOW_DEFAULT`]. Values above [`TEXT_WINDOW_MAX`] are clamped.
+pub fn text_window(content: &str, offset: i32, max_chars: i32) -> TextWindow {
+    let total_chars = content.chars().count();
+    let offset = usize::try_from(offset).unwrap_or(0).min(total_chars);
+    let max_chars = if max_chars <= 0 {
+        TEXT_WINDOW_DEFAULT
+    } else {
+        max_chars.min(TEXT_WINDOW_MAX)
+    };
+    let max_chars = usize::try_from(max_chars).unwrap_or(8_000);
+    let text: String = content.chars().skip(offset).take(max_chars).collect();
+    let end = offset + text.chars().count();
+    let truncated = end < total_chars;
+    TextWindow {
+        text,
+        offset,
+        next_offset: if truncated { Some(end) } else { None },
+        truncated,
+        total_chars,
+    }
 }
 
 pub async fn log_audit(pool: &PgPool, document_id: i32, action: &str, detail: Option<&str>) -> sqlx::Result<()> {
@@ -862,4 +918,32 @@ pub async fn list_jobs(pool: &PgPool, owner_id: i32) -> sqlx::Result<Vec<JobOut>
             )
         })
         .collect())
+}
+
+#[cfg(test)]
+mod text_window_tests {
+    use super::*;
+
+    #[test]
+    fn text_window_clamps_and_reports_the_next_offset() {
+        let content: String = "é".repeat(20_000);
+        let window = text_window(&content, 0, 50_000);
+        assert_eq!(window.text.chars().count(), TEXT_WINDOW_MAX as usize);
+        assert!(window.truncated);
+        assert_eq!(window.next_offset, Some(TEXT_WINDOW_MAX as usize));
+        assert_eq!(window.total_chars, 20_000);
+        let rest = text_window(&content, TEXT_WINDOW_MAX, 0);
+        assert_eq!(rest.offset, TEXT_WINDOW_MAX as usize);
+        assert_eq!(rest.text.chars().count(), 20_000 - TEXT_WINDOW_MAX as usize);
+        assert!(!rest.truncated);
+        assert_eq!(rest.next_offset, None);
+        let mid = text_window(&content, 11_000, 0);
+        assert_eq!(mid.text.chars().count(), TEXT_WINDOW_DEFAULT as usize);
+        assert!(mid.truncated);
+        assert_eq!(mid.next_offset, Some(11_000 + TEXT_WINDOW_DEFAULT as usize));
+        let past = text_window("abc", 10, 5);
+        assert_eq!(past.text, "");
+        assert!(!past.truncated);
+        assert_eq!(past.next_offset, None);
+    }
 }

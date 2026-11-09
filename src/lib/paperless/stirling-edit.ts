@@ -5,9 +5,11 @@
  * Commit: cookie multipart (or `{pull:true}` when `stirlingUpload === "ok"`).
  * Stirling does not POST back — the return path is the Paperrust fiche only.
  *
- * Happy path: one Stirling tab at `editorUrl` (the API sets
- * `?fileUrl=` so Stirling loads the PDF). `sourceFileUrl` is banner
- * fallback only — never the primary Éditer navigation.
+ * Stirling opens at origin+pathname only, via
+ * `window.open(url, "_blank", "noopener,noreferrer")` (or an
+ * `<a rel="noopener noreferrer">` when `window.open` is missing).
+ * The session token and session id never travel on that URL.
+ * `sourceFileUrl` stays the banner fallback.
  */
 
 import { trimOrigin, viteStirlingBaseUrl } from "../deploy-env.ts";
@@ -36,6 +38,9 @@ export type StirlingCommitResult = {
 export const STIRLING_EDIT_LABEL = "Éditer";
 export const STIRLING_EDIT_HINT_NOT_PDF = "L’édition Stirling n’est disponible que pour les PDF.";
 export const STIRLING_EDIT_HINT_NO_FILE = "Fichier original indisponible.";
+export const STIRLING_NOT_CONFIGURED =
+  "Stirling PDF n’est pas configuré pour cette archive.";
+export const STIRLING_CONFIG_CHECKING = "Vérification de Stirling…";
 export const STIRLING_EDIT_HINT_BLOCKED = "Impossible d’ouvrir Stirling PDF.";
 export const STIRLING_EDIT_NOT_READY = "L’édition Stirling n’est pas encore disponible.";
 export const STIRLING_EDIT_UNAVAILABLE = "Impossible d’ouvrir l’édition Stirling.";
@@ -69,7 +74,7 @@ export const STIRLING_AUTH_REQUIRED = "Authentification requise.";
 export const STIRLING_SESSION_EXPIRED = "La session d’édition a expiré.";
 export const M365_EDIT_HINT_DISCONNECTED = "Microsoft 365 n’est pas connecté.";
 
-/** localStorage override (Réglages). Empty → runtime `/api/config`, then dev Vite. */
+/** localStorage override (Réglages). Empty → URL from `GET /api/config`; no build-time editor address. */
 const STIRLING_BASE_STORAGE_KEY = "paperrust.stirlingBaseUrl";
 
 export const STIRLING_SETTINGS_TOC_ID = "settings-stirling";
@@ -84,7 +89,8 @@ export async function loadStirlingBaseUrl(): Promise<string> {
     const res = await fetch("/api/config", { credentials: "same-origin" });
     if (!res.ok) return runtimeStirlingUrl;
     const body = (await res.json()) as { stirlingUrl?: string | null };
-    runtimeStirlingUrl = trimOrigin(body.stirlingUrl ?? "");
+    const next = trimOrigin(body.stirlingUrl ?? "");
+    runtimeStirlingUrl = isAcceptableStirlingUrl(next, { allowHttp: devHttpAllowed() }) ? next : "";
     return runtimeStirlingUrl;
   } catch {
     return runtimeStirlingUrl;
@@ -93,6 +99,56 @@ export async function loadStirlingBaseUrl(): Promise<string> {
 
 export function cachedStirlingBaseUrl(): string {
   return runtimeStirlingUrl;
+}
+
+/**
+ * Absolute `https:` URL. `http:` only when `allowHttp` (dev). Rejects
+ * `javascript:`, `data:`, other schemes, and relative or scheme-less values.
+ */
+export function isAcceptableStirlingUrl(
+  raw: string | null | undefined,
+  opts?: { allowHttp?: boolean },
+): boolean {
+  const value = (raw ?? "").trim();
+  if (!value || value.startsWith("/") || value.startsWith(".") || /^[a-z][a-z0-9+.-]*:/i.test(value) === false) {
+    return false;
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (!url.hostname) return false;
+  if (url.protocol === "https:") return true;
+  if (url.protocol === "http:") return opts?.allowHttp === true;
+  return false;
+}
+
+/** `http:` Stirling origins are accepted only in dev. Node tests default to https. */
+function devHttpAllowed(explicit?: boolean): boolean {
+  if (typeof explicit === "boolean") return explicit;
+  try {
+    if (import.meta.env.DEV) return true;
+  } catch {
+    /* node tests have no Vite env */
+  }
+  return false;
+}
+
+/**
+ * True when the archive served an acceptable Stirling URL, or dev has an
+ * acceptable Vite override. Invalid values count as absent.
+ */
+export function stirlingConfiguredFrom(
+  apiUrl: string,
+  devUrl = viteStirlingBaseUrl(),
+  opts?: { allowHttp?: boolean },
+): boolean {
+  const allowHttp = devHttpAllowed(opts?.allowHttp);
+  return (
+    isAcceptableStirlingUrl(apiUrl, { allowHttp }) || isAcceptableStirlingUrl(devUrl, { allowHttp })
+  );
 }
 
 
@@ -231,7 +287,7 @@ export function hasFileUrl(raw: string | null | undefined): boolean {
   }
 }
 
-/** Alias — search `fileUrl` only (legacy callers / tests). */
+/** True when `editorUrl` carries a non-empty `fileUrl` query parameter. */
 export function editorUrlHasFileUrl(raw: string | null | undefined): boolean {
   const value = (raw ?? "").trim();
   if (!value) return false;
@@ -443,7 +499,7 @@ export function reasonFromHttpStatus(status: number): Exclude<StirlingFailureRea
   return isStirlingEditNotReadyStatus(status) ? "not_ready" : "unavailable";
 }
 
-/** M365 edit for Office types — session not ready. */
+/** Office edit is not available yet. */
 export function buildM365EditUrl(_params: { documentId: number }): string | null {
   return null;
 }
@@ -455,11 +511,14 @@ export function isM365Connected(): boolean {
 export function stirlingEditDisabledReason(opts: {
   target: DocumentFileEditTarget;
   hasFile: boolean;
+  /** `false` when `GET /api/config` has no `stirlingUrl` and dev has no Vite override. */
+  stirlingConfigured?: boolean;
 }): string | null {
   if (opts.target === "m365") {
     return isM365Connected() ? null : M365_EDIT_HINT_DISCONNECTED;
   }
   if (opts.target !== "stirling") return STIRLING_EDIT_HINT_NOT_PDF;
+  if (opts.stirlingConfigured === false) return STIRLING_NOT_CONFIGURED;
   if (!opts.hasFile) return STIRLING_EDIT_HINT_NO_FILE;
   return null;
 }
@@ -514,7 +573,7 @@ export function openUrlViaAnchor(url: string): boolean {
 /** `window.name` prefix; payload is JSON `{ fileUrl, commitUrl }`. */
 export const PAPERRUST_EDIT_WINDOW_NAME_PREFIX = "paperrustEdit=";
 
-/** @deprecated prefix — kept so older handoffs still resolve. */
+/** @deprecated Previous `window.name` prefix. Kept so older editors still parse. */
 export const PAPERRUST_FILEURL_WINDOW_NAME_PREFIX = "paperrustFileUrl=";
 
 /** Extract `fileUrl` from a navigate href (search first, then `#fileUrl=`). */
@@ -531,8 +590,8 @@ export function fileUrlFromNavigateUrl(url: string): string | null {
 }
 
 /**
- * The editor reads `window.name` prefix `paperrustEdit=` → JSON
- * `{ fileUrl, commitUrl }` (both http(s)). Token stays inside commitUrl path.
+ * Stirling reads `window.name` with the `paperrustEdit=` prefix and JSON
+ * `{ fileUrl, commitUrl }` (both http(s)). The token stays inside the commitUrl path.
  * Never put commitUrl on the Stirling query or hash.
  */
 export function stirlingWindowNameForEdit(handoff: StirlingEditHandoff): string {
@@ -612,19 +671,104 @@ export function editorNavigateUrlForSession(
   return resolveEditorNavigateUrl(session.editorUrl, session.sourceFileUrl);
 }
 
+const STIRLING_OPEN_FEATURES = "noopener,noreferrer";
+
+function sessionSecrets(
+  session: Partial<Pick<StirlingEditSession, "token" | "sessionId">>,
+): string[] {
+  return [session.token, session.sessionId].filter((value): value is string => {
+    return typeof value === "string" && value.trim().length > 0;
+  });
+}
+
+/** True when search, hash, or a session secret is present on the href. */
+export function stirlingHrefHasSessionSecret(href: string, secrets?: readonly string[]): boolean {
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return true;
+  }
+  if (url.search || url.hash) return true;
+  const haystack = `${url.pathname}`.toLowerCase();
+  for (const secret of secrets ?? []) {
+    const value = secret.trim().toLowerCase();
+    if (value.length >= 4 && haystack.includes(value)) return true;
+  }
+  return false;
+}
+
 /**
- * Open Stirling without leaking `window.opener`:
- * sync `about:blank` → `opener = null` → name handoff → `location.replace`.
- * Requires fileUrl + commitUrl.
+ * Stirling navigation target: `origin + pathname` of an acceptable absolute
+ * URL. Query and hash are dropped so `fileUrl`, tokens, and session ids
+ * cannot ride along. Returns null when the result still contains a secret.
+ */
+export function stirlingPublicHref(
+  editorUrl: string | null | undefined,
+  secrets?: readonly string[],
+): string | null {
+  const raw = (editorUrl ?? "").trim();
+  if (!isAcceptableStirlingUrl(raw, { allowHttp: devHttpAllowed() })) return null;
+  try {
+    const url = new URL(raw);
+    const href = `${url.origin}${url.pathname || "/"}`;
+    if (!isAcceptableStirlingUrl(href, { allowHttp: devHttpAllowed() })) return null;
+    if (stirlingHrefHasSessionSecret(href, secrets)) return null;
+    return href;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Validated archive or dev origin, shaped like the API editor URL (`{base}/`)
+ * so the opened path matches `origin + pathname` after `fileUrl` is stripped.
+ */
+export function configuredStirlingOpenHref(): string | null {
+  const raw = trimOrigin(cachedStirlingBaseUrl()) || trimOrigin(viteStirlingBaseUrl());
+  if (!raw) return null;
+  return stirlingPublicHref(`${raw}/`);
+}
+
+/**
+ * One Stirling tab. `noopener,noreferrer` makes browsers return null even
+ * when the tab opened, so a null handle is not a second anchor click.
+ */
+export function openStirlingTab(url: string, secrets?: readonly string[]): boolean {
+  if (!isAcceptableStirlingUrl(url, { allowHttp: devHttpAllowed() })) return false;
+  if (stirlingHrefHasSessionSecret(url, secrets)) return false;
+  if (typeof window !== "undefined" && typeof window.open === "function") {
+    try {
+      const popup = window.open(url, "_blank", STIRLING_OPEN_FEATURES);
+      if (popup) {
+        try {
+          popup.opener = null;
+        } catch {
+          /* ignore */
+        }
+      }
+      return true;
+    } catch {
+      /* use the link below */
+    }
+  }
+  return openUrlViaAnchor(url);
+}
+
+/**
+ * Open Stirling at origin+pathname. Requires a complete handoff so a session
+ * without fileUrl/commitUrl does not navigate, but those URLs are not copied
+ * onto the Stirling href.
  */
 export function openStirlingEditor(
-  session: Pick<StirlingEditSession, "editorUrl" | "sourceFileUrl" | "commitUrl">,
-): Window | null {
-  if (!resolveStirlingEditHandoff(session)) return null;
-  const popup = openStirlingGesturePopup("editor");
-  if (!popup) return null;
-  if (!navigateStirlingEditorSession(popup, session)) return null;
-  return popup;
+  session: Pick<StirlingEditSession, "editorUrl" | "sourceFileUrl" | "commitUrl"> &
+    Partial<Pick<StirlingEditSession, "token" | "sessionId">>,
+): boolean {
+  if (!resolveStirlingEditHandoff(session)) return false;
+  const secrets = sessionSecrets(session);
+  const href = stirlingPublicHref(session.editorUrl, secrets);
+  if (!href) return false;
+  return openStirlingTab(href, secrets);
 }
 
 /**

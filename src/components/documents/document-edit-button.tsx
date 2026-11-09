@@ -1,26 +1,29 @@
 import { useMutation } from "@tanstack/react-query";
 import { Loader2, Pencil } from "lucide-react";
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { isAuthRequired } from "@/lib/auth/auth-required";
 import { startPdfStirlingEdit } from "@/lib/paperless/actions";
 import {
+  STIRLING_CONFIG_CHECKING,
   STIRLING_EDIT_HINT_BLOCKED,
   STIRLING_EDIT_LABEL,
+  STIRLING_EDIT_STARTED_NO_FILEURL,
   STIRLING_SESSION_EXPIRED,
-  closeStirlingPopup,
+  configuredStirlingOpenHref,
   documentFileEditTarget,
   errorStatus,
   isM365Connected,
   isStirlingSessionExpired,
-  navigateStirlingEditorSession,
-  openStirlingGesturePopup,
+  openStirlingTab,
   parseStirlingEditSession,
+  loadStirlingBaseUrl,
   reasonFromHttpStatus,
-  resolveStirlingEditHandoff,
+  stirlingConfiguredFrom,
   stirlingEditDisabledReason,
+  stirlingPublicHref,
   toastForStirlingEditFailure,
   toastForStirlingEditStarted,
   type DocumentFileEditTarget,
@@ -69,7 +72,7 @@ function EditButtonShell({
 
 function onM365Click() {
   if (isM365Connected()) {
-    /* Office session — not ready. */
+    /* Office edit is not available yet. */
     return;
   }
 }
@@ -82,44 +85,51 @@ export function DocumentEditButton({
   onSessionStarted,
 }: DocumentEditButtonProps) {
   const target: DocumentFileEditTarget = documentFileEditTarget(mimeType, filename);
-  const hint = stirlingEditDisabledReason({ target, hasFile });
+  const [stirlingConfigured, setStirlingConfigured] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (target !== "stirling") return;
+    let cancelled = false;
+    void loadStirlingBaseUrl().then((url) => {
+      if (!cancelled) setStirlingConfigured(stirlingConfiguredFrom(url));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [target]);
+  const hint =
+    target === "stirling" && stirlingConfigured === null
+      ? STIRLING_CONFIG_CHECKING
+      : stirlingEditDisabledReason({
+          target,
+          hasFile,
+          stirlingConfigured: stirlingConfigured === false ? false : undefined,
+        });
   const disabled = target === null || hint !== null;
-  const gestureRef = useRef<Window | null>(null);
-
-  const abandonGesturePopup = () => {
-    closeStirlingPopup(gestureRef.current);
-    gestureRef.current = null;
-  };
+  const openedRef = useRef(false);
 
   const stirling = useMutation({
     mutationFn: () => startPdfStirlingEdit(documentId),
     onSuccess: (raw) => {
       const session = parseStirlingEditSession(raw);
       if (!session) {
-        abandonGesturePopup();
         toast.error(toastForStirlingEditFailure("not_ready"));
         return;
       }
       if (isStirlingSessionExpired(session)) {
-        abandonGesturePopup();
         toast.error(STIRLING_SESSION_EXPIRED);
         return;
       }
-      const editorPopup = gestureRef.current;
-      gestureRef.current = null;
-      if (editorPopup) {
-        if (!resolveStirlingEditHandoff(session)) {
-          closeStirlingPopup(editorPopup);
-        } else if (!navigateStirlingEditorSession(editorPopup, session)) {
-          toast.error(STIRLING_EDIT_HINT_BLOCKED);
-        } else {
-          toast.success(toastForStirlingEditStarted(session.stirlingUpload, undefined, true));
-        }
+      if (openedRef.current) {
+        const href = stirlingPublicHref(session.editorUrl, [session.token, session.sessionId]);
+        toast.success(
+          href
+            ? toastForStirlingEditStarted(session.stirlingUpload, href, false)
+            : STIRLING_EDIT_STARTED_NO_FILEURL,
+        );
       }
       onSessionStarted?.(session);
     },
     onError: (err) => {
-      abandonGesturePopup();
       if (isAuthRequired(err)) {
         toast.error(toastForStirlingEditFailure("auth"));
         return;
@@ -130,11 +140,11 @@ export function DocumentEditButton({
 
   const onStirlingClick = () => {
     if (stirling.isPending) return;
-    const editorPopup = openStirlingGesturePopup("editor");
-    if (!editorPopup) {
+    const href = configuredStirlingOpenHref();
+    openedRef.current = Boolean(href && openStirlingTab(href));
+    if (!openedRef.current) {
       toast.error(STIRLING_EDIT_HINT_BLOCKED);
     }
-    gestureRef.current = editorPopup;
     stirling.mutate();
   };
 

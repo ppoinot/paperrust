@@ -1,6 +1,10 @@
-/** Client upload hard cap — keep in sync with `consume::MAX_UPLOAD_BYTES` (API) and Ingress `proxy-body-size`. */
-export const MAX_UPLOAD_BYTES = 300 * 1024 * 1024;
-export const MAX_UPLOAD_LABEL = "300 Mo";
+/**
+ * File cap — keep in sync with `limits::MAX_UPLOAD_BYTES`.
+ * Cloudflare Free/Pro refuses a proxied body above 100 MB. The byte cap leaves
+ * 64 KiB for the multipart wrapper (`MULTIPART_OVERHEAD_BYTES`).
+ */
+export const MAX_UPLOAD_BYTES = 100_000_000 - 64 * 1024;
+export const MAX_UPLOAD_LABEL = "100 Mo";
 
 export function looksLikeHtml(body: string, contentType?: string | null): boolean {
   const ct = (contentType ?? "").toLowerCase();
