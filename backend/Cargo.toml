@@ -20,7 +20,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "registry"] }
 uuid = { version = "1.26.0", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "tiff", "webp"] }
-pdfium-render = "0.8"
+pdfium-render = "0.9"
 sha2 = "0.10"
 rand = "0.10"
 aes-gcm = "0.10"
