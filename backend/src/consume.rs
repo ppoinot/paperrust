@@ -431,6 +431,192 @@ pub async fn replace_document_pdf(
     Ok(ocr)
 }
 
+const WORD_STORED_SUMMARY: &str =
+    "Document Word enregistré. L'aperçu et l'OCR suivent l'ouverture dans l'éditeur.";
+
+/// Columns used by a Word original and the PDF WordCraft exports beside it.
+pub async fn ensure_word_rendition_schema(pool: &PgPool) -> anyhow::Result<()> {
+    sqlx::query("alter table documents add column if not exists rendition_pdf bytea")
+        .execute(pool)
+        .await?;
+    sqlx::query("alter table documents add column if not exists rendition_at timestamptz")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Replace the Word original. The previous rendition is dropped. OCR waits for the next PDF export.
+pub async fn replace_word_original(
+    pool: &PgPool,
+    document_id: i32,
+    owner_id: i32,
+    raw: Vec<u8>,
+    filename: &str,
+    kind: crate::word_files::WordKind,
+) -> anyhow::Result<()> {
+    if raw.len() > MAX_UPLOAD_BYTES {
+        anyhow::bail!(
+            "Fichier trop volumineux (max {} Mo).",
+            crate::limits::UPLOAD_LIMIT_MO
+        );
+    }
+    if !crate::word_files::is_rewritable(kind) || crate::word_files::classify(&raw, filename) != Some(kind)
+    {
+        anyhow::bail!("Le fichier enregistré n'est pas un document Word.");
+    }
+    let filename = crate::word_files::saved_filename(filename, kind);
+    let mime = crate::word_files::mime_for(kind);
+    let checksum = content_checksum(&raw);
+    let saved = sqlx::query(
+        r#"insert into document_previous_versions
+             (document_id, owner_id, original_bytes, original_filename, mime_type, reason)
+           select id, owner_id, original_bytes, original_filename, mime_type, 'word_replace'
+           from documents
+           where id = $1 and owner_id = $2 and deleted_at is null
+             and original_bytes is not null"#,
+    )
+    .bind(document_id)
+    .bind(owner_id)
+    .execute(pool)
+    .await?;
+    if saved.rows_affected() == 0 {
+        anyhow::bail!("document introuvable");
+    }
+    crate::preview::clear_pages(pool, document_id).await?;
+    let updated = sqlx::query(
+        r#"update documents set
+            original_bytes = $1,
+            mime_type = $2,
+            original_filename = $3,
+            file_size = $4,
+            file_data = null,
+            checksum = $5,
+            rendition_pdf = null,
+            rendition_at = null,
+            page_count = 1,
+            ocr_status = 'pending',
+            summary = $6,
+            modified_at = now()
+          where id = $7 and owner_id = $8 and deleted_at is null"#,
+    )
+    .bind(&raw)
+    .bind(mime)
+    .bind(&filename)
+    .bind(raw.len() as i32)
+    .bind(&checksum)
+    .bind(WORD_STORED_SUMMARY)
+    .bind(document_id)
+    .bind(owner_id)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() == 0 {
+        anyhow::bail!("document introuvable");
+    }
+    log_audit(
+        pool,
+        document_id,
+        "file_replaced",
+        Some("Document Word remplacé"),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Store the PDF WordCraft exported. The Word original and its checksum stay.
+/// Preview pages come from this PDF. OCR is not run here: `re_ocr_document`
+/// reads `original_bytes`, which is still the word-processor file.
+pub async fn store_word_rendition(
+    pool: &PgPool,
+    document_id: i32,
+    owner_id: i32,
+    raw: Vec<u8>,
+) -> anyhow::Result<()> {
+    if raw.len() > MAX_UPLOAD_BYTES {
+        anyhow::bail!(
+            "Fichier trop volumineux (max {} Mo).",
+            crate::limits::UPLOAD_LIMIT_MO
+        );
+    }
+    if !crate::preview::looks_like_pdf(&raw) {
+        anyhow::bail!("Le rendu doit être un PDF.");
+    }
+    let row = sqlx::query(
+        r#"select mime_type, original_filename,
+                  substring(original_bytes from 1 for 65536) as head
+           from documents
+           where id = $1 and owner_id = $2 and deleted_at is null
+             and original_bytes is not null and octet_length(original_bytes) > 0"#,
+    )
+    .bind(document_id)
+    .bind(owner_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = row else {
+        anyhow::bail!("document introuvable");
+    };
+    let mime: String = row.get("mime_type");
+    let filename: Option<String> = row.get("original_filename");
+    let head: Option<Vec<u8>> = row.get("head");
+    let name = filename.unwrap_or_default();
+    let head = head.unwrap_or_default();
+    let word = crate::word_files::is_word_mime(&mime)
+        || crate::word_files::classify(&head, &name).is_some();
+    if !word {
+        anyhow::bail!("pas un document Word");
+    }
+    let updated = sqlx::query(
+        r#"update documents set
+            rendition_pdf = $1,
+            rendition_at = now(),
+            ocr_status = 'pending',
+            summary = 'Export PDF enregistré. L''aperçu suit ce PDF.',
+            modified_at = now()
+          where id = $2 and owner_id = $3 and deleted_at is null"#,
+    )
+    .bind(&raw)
+    .bind(document_id)
+    .bind(owner_id)
+    .execute(pool)
+    .await?;
+    if updated.rows_affected() == 0 {
+        anyhow::bail!("document introuvable");
+    }
+    crate::preview::clear_pages(pool, document_id).await?;
+    let pdf = std::sync::Arc::<[u8]>::from(raw.into_boxed_slice());
+    let pdf_for_render = std::sync::Arc::clone(&pdf);
+    let pages = match crate::limits::run_heavy_blocking(
+        std::time::Duration::from_secs(crate::preview::RENDER_TIMEOUT_SECS),
+        move || crate::preview::render_all(&pdf_for_render, "application/pdf"),
+    )
+    .await
+    {
+        Ok(pages) => pages,
+        Err(e) => {
+            tracing::warn!(error = %e, "word rendition preview failed");
+            Vec::new()
+        }
+    };
+    if pages.is_empty() {
+        let _ = sqlx::query(
+            "update documents set page_count = 1 where id = $1 and owner_id = $2",
+        )
+        .bind(document_id)
+        .bind(owner_id)
+        .execute(pool)
+        .await;
+    } else if let Err(e) = crate::preview::store_pages(pool, document_id, owner_id, &pages).await {
+        tracing::warn!("store word rendition pages: {e}");
+    }
+    log_audit(
+        pool,
+        document_id,
+        "rendition_stored",
+        Some("PDF d'aperçu Word enregistré"),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn load_ocr_base_url(pool: &PgPool, owner_id: i32) -> Option<String> {
     sqlx::query_scalar::<_, String>(
         "select nullif(trim(ocr_base_url), '') from user_settings where user_id = $1",
@@ -710,8 +896,11 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
             crate::limits::UPLOAD_LIMIT_MO
         );
     }
-    // Browsers often send application/octet-stream; sniff magic so mime + /file stay PDF/PNG/JPEG.
-    {
+    // Browsers often send application/octet-stream; sniff magic so mime + /file stay honest.
+    let word_kind = crate::word_files::classify(&raw, &input.filename);
+    if let Some(kind) = word_kind {
+        input.mime_type = crate::word_files::mime_for(kind).into();
+    } else {
         let m = input.mime_type.to_ascii_lowercase();
         let sniff = m.is_empty()
             || m == "application/octet-stream"
@@ -731,13 +920,13 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
             }
         }
     }
-    // SYN-31: magic allowlist — reject anything that is not PDF/PNG/JPEG.
-    {
+    // Magic allowlist: PDF, PNG, JPEG, or a classified Word file.
+    if word_kind.is_none() {
         let ok = raw.starts_with(b"%PDF")
             || crate::preview::looks_like_png(raw.as_ref())
             || crate::preview::looks_like_jpeg(raw.as_ref());
         if !ok {
-            anyhow::bail!("Type de fichier non supporté (PDF, PNG ou JPEG uniquement).");
+            anyhow::bail!("Type de fichier non supporté (PDF, PNG, JPEG ou document Word).");
         }
         let m = input.mime_type.to_ascii_lowercase();
         let allowed = m == "application/pdf"
@@ -819,19 +1008,24 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
     };
 
     // SYN-48: Arc avoids a full raw clone for PDFium; semaphore bounds concurrency.
+    // A Word file is not a PDF. Preview and OCR wait for the exported rendition.
     let raw = std::sync::Arc::<[u8]>::from(raw.into_boxed_slice());
     let mime_for_preview = input.mime_type.clone();
     let raw_for_preview = std::sync::Arc::clone(&raw);
-    let rendered_pages = match crate::limits::run_heavy_blocking(
-        std::time::Duration::from_secs(crate::preview::RENDER_TIMEOUT_SECS),
-        move || crate::preview::render_all(&raw_for_preview, &mime_for_preview),
-    )
-    .await
-    {
-        Ok(pages) => Some(pages),
-        Err(e) => {
-            tracing::warn!(error = %e, "consume preview render failed");
-            None
+    let rendered_pages = if word_kind.is_some() {
+        None
+    } else {
+        match crate::limits::run_heavy_blocking(
+            std::time::Duration::from_secs(crate::preview::RENDER_TIMEOUT_SECS),
+            move || crate::preview::render_all(&raw_for_preview, &mime_for_preview),
+        )
+        .await
+        {
+            Ok(pages) => Some(pages),
+            Err(e) => {
+                tracing::warn!(error = %e, "consume preview render failed");
+                None
+            }
         }
     };
     if let Some(pages) = rendered_pages.as_ref() {
@@ -853,7 +1047,11 @@ pub async fn consume_document(pool: &PgPool, mut input: ConsumeInput, owner_id: 
         .collect();
     let ocr_allowlist = owner_tag_allowlist(owner_tag_names.iter().map(String::as_str));
 
-    if !skip && can_call && can_vision {
+    if word_kind.is_some() {
+        ocr.content = String::new();
+        ocr.tags = vec!["Inbox".into()];
+        ocr.summary = WORD_STORED_SUMMARY.into();
+    } else if !skip && can_call && can_vision {
         match run_llm_ocr(
             &input.provider,
             key.as_deref().unwrap_or(""),

@@ -19,6 +19,7 @@ import {
   MAX_UPLOAD_BYTES,
   UPLOAD_TOO_LARGE_FR,
 } from "@/lib/paperless/upload-errors";
+import { clientUploadRefusal, WORD_UPLOAD_ACCEPT, WORD_UPLOAD_REFUSAL } from "@/lib/paperless/wordcraft-edit";
 import { cn } from "@/lib/utils";
 
 type ConsumeResult = {
@@ -265,16 +266,29 @@ export function UploadDropzone({ compact }: { compact?: boolean }) {
   function take(files: FileList | File[] | null) {
     if (!files || files.length === 0) return;
     const added: QueueItem[] = [];
-    let rejected = false;
+    let rejection: string | null = null;
     for (const file of files) {
       if (file.size > MAX_UPLOAD_BYTES) {
-        rejected = true;
+        rejection = UPLOAD_TOO_LARGE_FR;
         added.push({
           id: crypto.randomUUID(),
           file,
           name: file.name,
           phase: "failed",
           detail: UPLOAD_TOO_LARGE_FR,
+        });
+        burstRef.current.failed += 1;
+        continue;
+      }
+      const refusal = clientUploadRefusal(file);
+      if (refusal) {
+        rejection = refusal;
+        added.push({
+          id: crypto.randomUUID(),
+          file,
+          name: file.name,
+          phase: "failed",
+          detail: refusal,
         });
         burstRef.current.failed += 1;
         continue;
@@ -288,9 +302,9 @@ export function UploadDropzone({ compact }: { compact?: boolean }) {
     }
     itemsRef.current = [...itemsRef.current, ...added];
     publish();
-    if (rejected) {
-      setInlineError(UPLOAD_TOO_LARGE_FR);
-      uploadErrorToast(UPLOAD_TOO_LARGE_FR);
+    if (rejection) {
+      setInlineError(rejection);
+      uploadErrorToast(rejection === UPLOAD_TOO_LARGE_FR ? UPLOAD_TOO_LARGE_FR : WORD_UPLOAD_REFUSAL);
     } else {
       setInlineError(null);
     }
@@ -322,7 +336,7 @@ export function UploadDropzone({ compact }: { compact?: boolean }) {
       <input
         ref={inputRef}
         type="file"
-        accept="image/*,.pdf,.svg,application/pdf"
+        accept={WORD_UPLOAD_ACCEPT}
         multiple
         className="hidden"
         onChange={(e) => take(e.target.files)}
@@ -338,7 +352,7 @@ export function UploadDropzone({ compact }: { compact?: boolean }) {
           <p className="text-xs text-muted">
             {busy
               ? `Vous pouvez ajouter d'autres fichiers.${waiting > 0 ? ` ${waiting} en attente.` : ""}`
-              : `PDF, JPEG, PNG — ${hint}`}
+              : `PDF, Word, JPEG, PNG — ${hint}`}
             {!busy && hasKey ? (
               <span className="ml-1 text-emerald-700 dark:text-emerald-300">
                 · Clé {providerLabel(llm.provider)} configurée

@@ -43,16 +43,6 @@ import {
   startLlmOAuthLogin,
   type OAuthLlmProvider,
 } from "@/lib/paperless/llm-oauth";
-import {
-  STIRLING_NOT_CONFIGURED,
-  STIRLING_SETTINGS_HELP,
-  STIRLING_SETTINGS_TOC_ID,
-  loadStirlingBaseUrl,
-  stirlingConfiguredFrom,
-  readStirlingBaseUrlOverride,
-  writeStirlingBaseUrlOverride,
-} from "@/lib/paperless/stirling-edit";
-
 export const Route = createFileRoute("/settings")({ component: Page });
 
 const SELECTABLE: LlmProvider[] = ["xai", "openai", "anthropic", "selfhosted"];
@@ -61,7 +51,7 @@ const SETTINGS_TOC: readonly SettingsTocItem[] = [
   { id: "settings-ocr", label: "OCR par LLM" },
   { id: "settings-api-tokens", label: "Tokens API" },
   { id: PAPERLESS_IMPORT_TOC_ID, label: "Import Paperless-ngx" },
-  { id: STIRLING_SETTINGS_TOC_ID, label: "Édition PDF" },
+  { id: "settings-edition", label: "Édition" },
   { id: "settings-archive", label: "Archive" },
   { id: "settings-corbeille", label: "Corbeille" },
 ];
@@ -92,9 +82,6 @@ function Page() {
   const [language, setLanguage] = useState("fr");
   const [autoMatch, setAutoMatch] = useState(true);
   const [trashRetentionDays, setTrashRetentionDays] = useState<30 | 60 | 90>(30);
-  const [stirlingBaseUrl, setStirlingBaseUrl] = useState(readStirlingBaseUrlOverride);
-  const [stirlingPlaceholder, setStirlingPlaceholder] = useState("");
-  const [stirlingConfigured, setStirlingConfigured] = useState<boolean | null>(null);
   const [tokenName, setTokenName] = useState("iPhone");
   const [tokenScope, setTokenScope] = useState<TokenPreset>("ingest");
   const [freshToken, setFreshToken] = useState<string | null>(null);
@@ -104,18 +91,6 @@ function Page() {
         LLM_OAUTH_PROVIDERS.map((p) => [p.id, readLlmOAuthConnection(p.id)]),
       ) as Record<OAuthLlmProvider, ReturnType<typeof readLlmOAuthConnection>>,
   );
-
-  useEffect(() => {
-    let cancelled = false;
-    void loadStirlingBaseUrl().then((url) => {
-      if (cancelled) return;
-      if (url) setStirlingPlaceholder(url);
-      setStirlingConfigured(stirlingConfiguredFrom(url));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     if (!remote.data) return;
@@ -578,30 +553,14 @@ function Page() {
         </section>
         <PaperlessImportSection />
         <section
-          id={STIRLING_SETTINGS_TOC_ID}
+          id="settings-edition"
           className="scroll-mt-24 rounded-xl bg-surface p-5 shadow-[var(--shadow-border)]"
         >
-          <h2 className="font-display text-xl">Édition PDF (Stirling)</h2>
-          <p className="mt-1 text-sm text-muted">{STIRLING_SETTINGS_HELP}</p>
-          <div className="mt-4">
-            <Label htmlFor="stirling-base-url">URL Stirling</Label>
-            <Input
-              id="stirling-base-url"
-              className="mt-1 font-mono"
-              type="url"
-              autoComplete="off"
-              placeholder={stirlingPlaceholder}
-              value={stirlingBaseUrl}
-              onChange={(e) => {
-                const next = e.target.value;
-                setStirlingBaseUrl(next);
-                writeStirlingBaseUrlOverride(next);
-              }}
-            />
-            {stirlingConfigured === false ? (
-              <p className="mt-2 text-sm text-muted">{STIRLING_NOT_CONFIGURED}</p>
-            ) : null}
-          </div>
+          <h2 className="font-display text-xl">Édition</h2>
+          <p className="mt-1 text-sm text-muted">
+            Les PDF s’ouvrent dans PdfCraft, les documents Word dans WordCraft. Les deux sont servis
+            avec Paperrust et pgrust par Docker Compose. Enregistrer renvoie le fichier dans l’archive.
+          </p>
         </section>
         <section id="settings-archive" className="scroll-mt-24 rounded-xl bg-surface p-5 shadow-[var(--shadow-border)]">
           <h2 className="font-display text-xl">Archive</h2>

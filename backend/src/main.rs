@@ -16,8 +16,11 @@ mod paper;
 mod preview;
 mod queries;
 mod paperless_import;
+mod pdf_edit;
 mod seed;
 mod stirling_edit;
+mod word_files;
+mod wordcraft;
 
 use axum::extract::{
     ConnectInfo, DefaultBodyLimit, Extension, FromRequest, Multipart, Path, Query, Request, State,
@@ -134,6 +137,8 @@ async fn main() -> anyhow::Result<()> {
     }
     crate::paperless_import::ensure_schema(&pool).await?;
     crate::stirling_edit::ensure_schema(&pool).await?;
+    crate::pdf_edit::ensure_schema(&pool).await?;
+    crate::consume::ensure_word_rendition_schema(&pool).await?;
     seed::ensure_seeded(&pool).await?;
     let state = AppState {
         pool: pool.clone(),
@@ -170,6 +175,12 @@ async fn main() -> anyhow::Result<()> {
             post(stirling_commit_auth),
         )
         .route("/api/edit/stirling/{token}/commit", post(stirling_commit_token))
+        .route(
+            "/api/documents/{id}/edit/pdfcraft/commit",
+            post(pdf_edit_commit_auth),
+        )
+        .route("/api/edit/pdfcraft/{token}/commit", post(pdf_edit_commit_token))
+        .route("/api/documents/{id}/wordcraft/commit", post(wordcraft_commit))
         .layer(DefaultBodyLimit::max(crate::limits::CLOUDFLARE_MAX_BODY_BYTES))
         .layer(from_fn_with_state(state.clone(), auth_gate));
 
@@ -209,6 +220,19 @@ async fn main() -> anyhow::Result<()> {
                 .head(stirling_session_file)
                 .options(stirling_session_file_options),
         )
+        .route("/api/documents/{id}/edit/pdfcraft", post(pdf_edit_start))
+        .route(
+            "/api/edit/pdfcraft/{token}/file",
+            get(pdf_edit_session_file)
+                .head(pdf_edit_session_file)
+                .options(pdf_edit_session_file_options),
+        )
+        .route("/pdfcraft", get(pdfcraft_proxy).head(pdfcraft_proxy))
+        .route("/pdfcraft/", get(pdfcraft_proxy).head(pdfcraft_proxy))
+        .route("/pdfcraft/{*path}", get(pdfcraft_proxy).head(pdfcraft_proxy))
+        .route("/wordcraft", get(wordcraft_proxy).head(wordcraft_proxy))
+        .route("/wordcraft/", get(wordcraft_proxy).head(wordcraft_proxy))
+        .route("/wordcraft/{*path}", get(wordcraft_proxy).head(wordcraft_proxy))
         .route("/api/search", get(search))
         .route("/api/tags", get(list_tags_h).post(upsert_tag).put(upsert_tag))
         .route("/api/tags/{id}", delete(delete_tag))
@@ -850,6 +874,8 @@ async fn file_original(
         "image/png".to_string()
     } else if crate::preview::looks_like_jpeg(&bytes) {
         "image/jpeg".to_string()
+    } else if let Some(kind) = crate::word_files::classify(&bytes, &filename) {
+        crate::word_files::mime_for(kind).to_string()
     } else {
         return Ok(not_found_json());
     };
@@ -1301,9 +1327,27 @@ fn content_security_policy(nonce: &str) -> String {
     )
 }
 
+async fn pdfcraft_proxy(req: Request) -> Response {
+    let head = *req.method() == Method::HEAD;
+    let path = req.uri().path().to_string();
+    pdf_edit::proxy_pdfcraft(head, &path).await
+}
+
+async fn wordcraft_proxy(req: Request) -> Response {
+    let head = *req.method() == Method::HEAD;
+    let path = req.uri().path().to_string();
+    wordcraft::proxy_wordcraft(head, &path).await
+}
+
 async fn security_headers(req: Request, next: Next) -> Response {
     // SYN-29 / SYN-63: baseline browser isolation + per-response CSP nonce.
     // HSTS: never trust X-Forwarded-Proto unless TCP peer is trusted (same as XFH).
+    // /pdfcraft and /wordcraft are same-origin editor frames.
+    let path = req.uri().path().to_string();
+    let pdfcraft_asset = path == "/pdfcraft" || path.starts_with("/pdfcraft/");
+    let wordcraft_asset = path == "/wordcraft" || path.starts_with("/wordcraft/");
+    let editor_asset = pdfcraft_asset || wordcraft_asset;
+    let token_file = path.starts_with("/api/edit/pdfcraft/") && path.ends_with("/file");
     let peer = connect_peer(&req);
     let host = auth::request_host(req.headers(), peer);
     let xfp_https = auth::peer_trusts_xfh(peer)
@@ -1327,11 +1371,12 @@ async fn security_headers(req: Request, next: Next) -> Response {
     let nonce = csp_nonce();
     let csp = content_security_policy(&nonce);
     let mut res = next.run(req).await;
-    let is_html = res
-        .headers()
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| ct.starts_with("text/html"));
+    let is_html = !editor_asset
+        && res
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("text/html"));
     if is_html {
         let (mut parts, body) = res.into_parts();
         let bytes = match axum::body::to_bytes(body, 8 * 1024 * 1024).await {
@@ -1351,14 +1396,34 @@ async fn security_headers(req: Request, next: Next) -> Response {
         res = Response::from_parts(parts, axum::body::Body::from(body_bytes));
     }
     let h = res.headers_mut();
-    h.insert("x-frame-options", HeaderValue::from_static("DENY"));
     h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
-    h.insert(
-        "referrer-policy",
-        HeaderValue::from_static("strict-origin-when-cross-origin"),
-    );
-    if let Ok(v) = HeaderValue::from_str(&csp) {
-        h.insert("content-security-policy", v);
+    if pdfcraft_asset {
+        h.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
+        h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+        h.insert(
+            "content-security-policy",
+            HeaderValue::from_static(pdf_edit::PDFCRAFT_CSP),
+        );
+    } else if wordcraft_asset {
+        h.insert("x-frame-options", HeaderValue::from_static("SAMEORIGIN"));
+        h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+        h.insert(
+            "content-security-policy",
+            HeaderValue::from_static(wordcraft::WORDCRAFT_CSP),
+        );
+    } else {
+        h.insert("x-frame-options", HeaderValue::from_static("DENY"));
+        h.insert(
+            "referrer-policy",
+            HeaderValue::from_static(if token_file {
+                "no-referrer"
+            } else {
+                "strict-origin-when-cross-origin"
+            }),
+        );
+        if let Ok(v) = HeaderValue::from_str(&csp) {
+            h.insert("content-security-policy", v);
+        }
     }
     if let Ok(v) = HeaderValue::from_str(&nonce) {
         h.insert("x-paperrust-csp-nonce", v);
@@ -2160,6 +2225,228 @@ async fn stirling_commit_auth(
         }
         Err(e) => e.into_response(),
     }
+}
+
+async fn pdf_edit_start(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i32>,
+    req: Request,
+) -> Response {
+    if !rate_limit_ok(&format!("pdf-edit-start:{}", user.id), 10, 60) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "rate_limited" })),
+        )
+            .into_response();
+    }
+    let host = auth::request_host(req.headers(), connect_peer(&req));
+    match pdf_edit::start_session(&state.pool, user.id, id, &host).await {
+        Ok(resp) => Json(resp).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn pdf_edit_session_file(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    req: Request,
+) -> Response {
+    if !rate_limit_ok(&format!("pdf-edit-file:{token}"), 60, 60) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "rate_limited" })),
+        )
+            .into_response();
+    }
+    let method_is_head = *req.method() == Method::HEAD;
+    let headers = req.headers().clone();
+    let mut res = pdf_edit::serve_session_file(&state.pool, &token, method_is_head).await;
+    pdf_edit::apply_pdf_file_cors(&headers, &mut res);
+    res
+}
+
+async fn pdf_edit_session_file_options(headers: HeaderMap) -> Response {
+    let mut res = StatusCode::NO_CONTENT.into_response();
+    pdf_edit::apply_pdf_file_cors(&headers, &mut res);
+    res
+}
+
+async fn pdf_edit_commit_token(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    req: Request,
+) -> Response {
+    if !rate_limit_ok(&format!("pdf-edit-commit:{token}"), 10, 60) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "rate_limited" })),
+        )
+            .into_response();
+    }
+    match parse_pdf_edit_commit_body(&state, req).await {
+        Ok((file, _)) => match pdf_edit::commit_session(&state.pool, &token, file).await {
+            Ok(resp) => Json(resp).into_response(),
+            Err(e) => e.into_response(),
+        },
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn pdf_edit_commit_auth(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i32>,
+    req: Request,
+) -> Response {
+    if !rate_limit_ok(&format!("pdf-edit-commit-auth:{}", user.id), 10, 60) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "rate_limited" })),
+        )
+            .into_response();
+    }
+    if !auth::document_owned(&state.pool, id, user.id)
+        .await
+        .unwrap_or(false)
+    {
+        return not_found_json();
+    }
+    match parse_pdf_edit_commit_body(&state, req).await {
+        Ok((file, token)) => {
+            match pdf_edit::commit_for_document(&state.pool, user.id, id, token.as_deref(), file).await
+            {
+                Ok(resp) => Json(resp).into_response(),
+                Err(e) => e.into_response(),
+            }
+        }
+        Err(e) => e.into_response(),
+    }
+}
+
+async fn wordcraft_commit(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i32>,
+    req: Request,
+) -> Response {
+    if !rate_limit_ok(&format!("wordcraft-commit:{}", user.id), 10, 60) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "error": "rate_limited" })),
+        )
+            .into_response();
+    }
+    if !auth::document_owned(&state.pool, id, user.id)
+        .await
+        .unwrap_or(false)
+    {
+        return not_found_json();
+    }
+    let (bytes, filename) = match parse_pdf_edit_commit_body(&state, req).await {
+        Ok((Some(file), _)) => file,
+        Ok((None, _)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "unsupported_save" })),
+            )
+                .into_response();
+        }
+        Err(e) => return e.into_response(),
+    };
+    let outcome = match crate::word_files::classify_save(&bytes, &filename) {
+        crate::word_files::IncomingSave::Ignore => Ok("ignored"),
+        crate::word_files::IncomingSave::Reject => Err(anyhow::anyhow!("unsupported_save")),
+        crate::word_files::IncomingSave::Rendition => {
+            consume::store_word_rendition(&state.pool, id, user.id, bytes)
+                .await
+                .map(|()| "rendition")
+        }
+        crate::word_files::IncomingSave::Replace(kind) => {
+            consume::replace_word_original(&state.pool, id, user.id, bytes, &filename, kind)
+                .await
+                .map(|()| "original")
+        }
+    };
+    match outcome {
+        Ok(kind) => Json(serde_json::json!({
+            "ok": true,
+            "kind": kind,
+            "documentId": id,
+        }))
+        .into_response(),
+        Err(err) => {
+            let msg = err.to_string();
+            if msg.contains("introuvable") {
+                return not_found_json();
+            }
+            if msg.contains("unsupported_save") {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "unsupported_save" })),
+                )
+                    .into_response();
+            }
+            if msg.contains("trop volumineux") {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(serde_json::json!({ "error": "payload_too_large" })),
+                )
+                    .into_response();
+            }
+            tracing::warn!("wordcraft commit failed");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "request_failed" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Multipart commit (`file` + optional `token`).
+async fn parse_pdf_edit_commit_body(
+    state: &AppState,
+    req: Request,
+) -> Result<(Option<(Vec<u8>, String)>, Option<String>), pdf_edit::StartError> {
+    let ct = req
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !ct.starts_with("multipart/form-data") {
+        return Err(pdf_edit::StartError::bad("missing_file"));
+    }
+    let mut multipart = Multipart::from_request(req, state)
+        .await
+        .map_err(|_| pdf_edit::StartError::bad("missing_file"))?;
+    let mut raw: Option<Vec<u8>> = None;
+    let mut filename = String::new();
+    let mut token: Option<String> = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "file" || name == "document" || name == "upload" {
+            filename = field.file_name().unwrap_or("document.pdf").to_string();
+            let bytes = field
+                .bytes()
+                .await
+                .map_err(|_| pdf_edit::StartError::bad("missing_file"))?;
+            if bytes.len() > crate::limits::MAX_UPLOAD_BYTES {
+                return Err(pdf_edit::StartError {
+                    status: StatusCode::PAYLOAD_TOO_LARGE,
+                    code: "payload_too_large",
+                });
+            }
+            raw = Some(bytes.to_vec());
+        } else if name == "token" {
+            let v = field.text().await.unwrap_or_default();
+            if !v.trim().is_empty() {
+                token = Some(v.trim().to_string());
+            }
+        }
+    }
+    Ok((raw.map(|b| (b, filename)), token))
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,10 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { ArrowLeft, Download, Loader2, ScanText } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { DocumentEditButton } from "@/components/documents/document-edit-button";
-import { StirlingApplyPanel } from "@/components/documents/stirling-apply-panel";
+import { PdfCraftHost } from "@/components/documents/pdfcraft-host";
+import { PdfEditApplyPanel } from "@/components/documents/pdf-edit-apply-panel";
+import { WordEditApplyPanel } from "@/components/documents/word-edit-apply-panel";
+import { WordcraftHost } from "@/components/documents/wordcraft-host";
 import {
   DocumentFicheForm,
   type FicheSaveStatus,
@@ -12,22 +15,32 @@ import {
 import { DocumentPages } from "@/components/documents/document-pages";
 import { AppShell } from "@/components/layout/app-shell";
 import { Button } from "@/components/ui/button";
-import { commitPdfStirlingEdit, fetchDocument, pullPdfStirlingEdit, rerunOcr } from "@/lib/paperless/actions";
+import { fetchDocument, rerunOcr } from "@/lib/paperless/actions";
 import { isAuthRequired } from "@/lib/auth/auth-required";
+import { useSessionIdentity } from "@/lib/auth/session-identity";
 import { humanizeOcrError } from "@/lib/paperless/format";
 import { readLlmSettings } from "@/lib/paperless/llm-settings";
 import {
-  STIRLING_APPLY_SUCCESS,
-  STIRLING_EDIT_HINT_BLOCKED,
-  STIRLING_OPEN_FILE_FAILED,
-  STIRLING_SESSION_EXPIRED,
-  isStirlingSessionExpired,
-  openStirlingEditor,
-  openStirlingSourceFile,
-  resolveStirlingEditHandoff,
-  toastForStirlingCommitFailure,
-  type StirlingEditSession,
-} from "@/lib/paperless/stirling-edit";
+  PDF_APPLY_BANNER_HELP,
+  PDF_APPLY_SUCCESS,
+  PDF_OPEN_FILE_FAILED,
+  PDF_SESSION_EXPIRED,
+  documentFileEditTarget,
+  isPdfEditSessionExpired,
+  openUrlViaAnchor,
+  pdfcraftEditorUrl,
+  requestEditorSave,
+  toastForPdfEditCommitFailure,
+  type PdfEditSession,
+} from "@/lib/paperless/pdfcraft-edit";
+import {
+  WORD_APPLY_HELP,
+  WORD_DIRTY_LEAVE,
+  WORD_ORIGINAL_SAVED,
+  WORD_RENDITION_SAVED,
+  requestWordSave,
+  wordEditionTabUrl,
+} from "@/lib/paperless/wordcraft-edit";
 
 export const Route = createFileRoute("/documents/$id")({ component: DocumentDetail });
 
@@ -55,13 +68,35 @@ function DocumentDetail() {
   const doc = query.data;
   const [saveStatus, setSaveStatus] = useState<FicheSaveStatus>("idle");
   const [viewerEpoch, setViewerEpoch] = useState(0);
-  const [stirlingSession, setStirlingSession] = useState<StirlingEditSession | null>(null);
+  const [editSession, setEditSession] = useState<PdfEditSession | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [wordOpen, setWordOpen] = useState(false);
+  const [wordClosed, setWordClosed] = useState(false);
+  const [wordDirty, setWordDirty] = useState(false);
+  const editorFrameRef = useRef<HTMLIFrameElement>(null);
+  const wordFrameRef = useRef<HTMLIFrameElement>(null);
+  const identity = useSessionIdentity();
   const onSaveStatusChange = useCallback((status: FicheSaveStatus) => {
     setSaveStatus(status);
   }, []);
 
-  const clearStirlingSession = useCallback(() => {
-    setStirlingSession(null);
+  const wordDoc = doc
+    ? documentFileEditTarget(doc.mimeType, doc.originalFilename) === "wordcraft"
+    : false;
+  const showWordEditor = Boolean(doc) && wordDoc && !wordClosed && wordOpen;
+  const author = identity.isPending ? null : (identity.data?.name ?? "");
+
+  const hideWordEditor = useCallback(() => {
+    setWordClosed(true);
+    setWordOpen(false);
+    if (typeof window === "undefined" || window.location.hash !== "#edition") return;
+    const next = `${window.location.pathname}${window.location.search}`;
+    window.history.replaceState(window.history.state, "", next);
+  }, []);
+
+  const clearEditSession = useCallback(() => {
+    setEditSession(null);
+    setEditing(false);
   }, []);
 
   const refreshAfterCommit = useCallback(() => {
@@ -69,81 +104,59 @@ function DocumentDetail() {
     void qc.invalidateQueries({ queryKey: ["documents"] });
     void qc.invalidateQueries({ queryKey: ["dashboard"] });
     setViewerEpoch((n) => n + 1);
-    clearStirlingSession();
-  }, [qc, docId, clearStirlingSession]);
+    clearEditSession();
+  }, [qc, docId, clearEditSession]);
+
+  const refreshWord = useCallback(() => {
+    void qc.invalidateQueries({ queryKey: ["document", docId] });
+    void qc.invalidateQueries({ queryKey: ["documents"] });
+    void qc.invalidateQueries({ queryKey: ["dashboard"] });
+    setViewerEpoch((n) => n + 1);
+  }, [qc, docId]);
 
   useEffect(() => {
-    if (!stirlingSession) return;
-    if (isStirlingSessionExpired(stirlingSession)) {
-      toast.error(STIRLING_SESSION_EXPIRED);
-      clearStirlingSession();
+    setWordOpen(false);
+    setWordClosed(false);
+    setWordDirty(false);
+    clearEditSession();
+  }, [docId, clearEditSession]);
+
+  useEffect(() => {
+    if (wordDoc && !wordClosed) setWordOpen(true);
+  }, [wordDoc, wordClosed]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || window.location.hash !== "#edition") return;
+    if (!wordDoc) return;
+    setWordClosed(false);
+    setWordOpen(true);
+  }, [docId, wordDoc]);
+
+  useEffect(() => {
+    if (!editSession) return;
+    if (isPdfEditSessionExpired(editSession)) {
+      toast.error(PDF_SESSION_EXPIRED);
+      clearEditSession();
       return;
     }
-    const t = Date.parse(stirlingSession.expiresAt);
-    const ms = t - Date.now();
+    const expires = Date.parse(editSession.expiresAt);
+    const ms = expires - Date.now();
     if (!Number.isFinite(ms) || ms <= 0) return;
-    const id = window.setTimeout(() => {
-      toast.error(STIRLING_SESSION_EXPIRED);
-      clearStirlingSession();
+    const timer = window.setTimeout(() => {
+      toast.error(PDF_SESSION_EXPIRED);
+      clearEditSession();
     }, ms);
-    return () => window.clearTimeout(id);
-  }, [stirlingSession, clearStirlingSession]);
+    return () => window.clearTimeout(timer);
+  }, [editSession, clearEditSession]);
 
-  const onSessionStarted = useCallback((session: StirlingEditSession) => {
-    if (isStirlingSessionExpired(session)) {
-      toast.error(STIRLING_SESSION_EXPIRED);
+  const onSessionStarted = useCallback((session: PdfEditSession) => {
+    if (isPdfEditSessionExpired(session)) {
+      toast.error(PDF_SESSION_EXPIRED);
       return;
     }
-    setStirlingSession(session);
+    setEditSession(session);
+    setEditing(true);
   }, []);
-
-  const commit = useMutation({
-    mutationFn: (file: File) => {
-      if (!stirlingSession || isStirlingSessionExpired(stirlingSession)) {
-        throw Object.assign(new Error(STIRLING_SESSION_EXPIRED), { status: 410 });
-      }
-      return commitPdfStirlingEdit(docId, file, stirlingSession.token, file.name);
-    },
-    onSuccess: () => {
-      toast.success(STIRLING_APPLY_SUCCESS);
-      refreshAfterCommit();
-    },
-    onError: (err) => {
-      if (err instanceof Error && err.message === STIRLING_SESSION_EXPIRED) {
-        toast.error(STIRLING_SESSION_EXPIRED);
-        clearStirlingSession();
-        return;
-      }
-      if (isAuthRequired(err)) {
-        toast.error(toastForStirlingCommitFailure(err));
-        return;
-      }
-      toast.error(toastForStirlingCommitFailure(err));
-    },
-  });
-
-  const pull = useMutation({
-    mutationFn: () => {
-      if (!stirlingSession || isStirlingSessionExpired(stirlingSession)) {
-        throw Object.assign(new Error(STIRLING_SESSION_EXPIRED), { status: 410 });
-      }
-      return pullPdfStirlingEdit(docId, stirlingSession.token);
-    },
-    onSuccess: () => {
-      toast.success(STIRLING_APPLY_SUCCESS);
-      refreshAfterCommit();
-    },
-    onError: (err) => {
-      if (err instanceof Error && err.message === STIRLING_SESSION_EXPIRED) {
-        toast.error(STIRLING_SESSION_EXPIRED);
-        clearStirlingSession();
-        return;
-      }
-      toast.error(toastForStirlingCommitFailure(err));
-    },
-  });
-
-  const applyPending = commit.isPending || pull.isPending;
 
   const ocr = useMutation({
     mutationFn: () => {
@@ -196,8 +209,8 @@ function DocumentDetail() {
   const canDownload = Boolean(doc.hasOriginal) || doc.fileSize > 0;
   const statusLabel = saveStatusLabel(saveStatus);
   const liveSession =
-    stirlingSession && stirlingSession.documentId === docId && !isStirlingSessionExpired(stirlingSession)
-      ? stirlingSession
+    editSession && editSession.documentId === docId && !isPdfEditSessionExpired(editSession)
+      ? editSession
       : null;
 
   return (
@@ -207,11 +220,7 @@ function DocumentDetail() {
         <div className="flex items-center gap-2">
           {statusLabel ? (
             <span
-              className={
-                saveStatus === "error"
-                  ? "text-sm text-danger"
-                  : "text-sm text-muted"
-              }
+              className={saveStatus === "error" ? "text-sm text-danger" : "text-sm text-muted"}
               aria-live="polite"
             >
               {statusLabel}
@@ -222,6 +231,23 @@ function DocumentDetail() {
             mimeType={doc.mimeType}
             filename={doc.originalFilename}
             hasFile={canDownload}
+            editing={wordDoc ? showWordEditor : Boolean(liveSession) && editing}
+            sessionOpen={wordDoc ? true : Boolean(liveSession)}
+            onShowReading={() => {
+              if (wordDoc) {
+                hideWordEditor();
+                return;
+              }
+              setEditing(false);
+            }}
+            onShowEditing={() => {
+              if (wordDoc) {
+                setWordClosed(false);
+                setWordOpen(true);
+                return;
+              }
+              setEditing(true);
+            }}
             onSessionStarted={onSessionStarted}
           />
           {canDownload ? (
@@ -240,42 +266,132 @@ function DocumentDetail() {
       }
     >
       <div className="mb-4">
-        <Link to="/documents" search={{}} className="inline-flex items-center gap-1 text-sm text-muted hover:text-fg">
+        <Link
+          to="/documents"
+          search={{}}
+          className="inline-flex items-center gap-1 text-sm text-muted hover:text-fg"
+          onClick={(event) => {
+            if (!wordDirty) return;
+            if (!window.confirm(WORD_DIRTY_LEAVE)) event.preventDefault();
+          }}
+        >
           <ArrowLeft className="size-4" />
           Documents
         </Link>
       </div>
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1.1fr)_minmax(18rem,0.9fr)] lg:items-start">
         <div className="space-y-4">
-          {liveSession ? (
-            <StirlingApplyPanel
-              session={liveSession}
-              pending={applyPending}
-              onApplyFile={(file) => commit.mutate(file)}
-              onPull={liveSession.stirlingUpload === "ok" ? () => pull.mutate() : undefined}
-              onReopen={() => {
-                if (!resolveStirlingEditHandoff(liveSession)) return;
-                const opened = openStirlingEditor(liveSession);
-                if (!opened) toast.error(STIRLING_EDIT_HINT_BLOCKED);
-              }}
-              onOpenFile={() => {
-                const opened = openStirlingSourceFile(liveSession.sourceFileUrl);
-                if (!opened) toast.error(STIRLING_OPEN_FILE_FAILED);
-              }}
-              onCancel={clearStirlingSession}
-            />
+          {wordDoc && author !== null ? (
+            <div
+              className={
+                showWordEditor
+                  ? "space-y-4"
+                  : "pointer-events-none invisible fixed top-0 left-0 -z-10 h-[80vh] w-[min(100%,72rem)] overflow-hidden"
+              }
+              aria-hidden={showWordEditor ? undefined : true}
+              inert={showWordEditor ? undefined : true}
+            >
+              {showWordEditor ? (
+                <WordEditApplyPanel
+                  documentId={docId}
+                  onSave={() => {
+                    const frame = wordFrameRef.current;
+                    const saved = requestWordSave(frame?.contentWindow ?? null);
+                    if (!saved) {
+                      frame?.focus();
+                      toast.message(WORD_APPLY_HELP);
+                    }
+                  }}
+                  onOpenEditor={() => {
+                    const origin = typeof window === "undefined" ? "" : window.location.origin;
+                    let opened = false;
+                    try {
+                      opened = origin ? openUrlViaAnchor(wordEditionTabUrl(origin, docId)) : false;
+                    } catch {
+                      opened = false;
+                    }
+                    if (!opened) toast.error(PDF_OPEN_FILE_FAILED);
+                  }}
+                  onCancel={hideWordEditor}
+                />
+              ) : null}
+              <WordcraftHost
+                key={docId}
+                documentId={docId}
+                filename={doc.originalFilename || "document.docx"}
+                author={author}
+                frameRef={wordFrameRef}
+                autoExport
+                onDirty={setWordDirty}
+                onCommitted={(result) => {
+                  if (result.kind === "rendition") toast.success(WORD_RENDITION_SAVED);
+                  else if (result.kind === "original") toast.success(WORD_ORIGINAL_SAVED);
+                  refreshWord();
+                }}
+              />
+            </div>
           ) : null}
-          <div className="max-h-[80vh] overflow-y-auto rounded-xl bg-surface p-3 shadow-[var(--shadow-border)]">
-            <DocumentPages
-              key={`${docId}-${viewerEpoch}`}
-              docId={docId}
-              title={doc.title}
-              svg={doc.thumbnailSvg}
-              fileData={doc.fileData}
-              mimeType={doc.mimeType}
-              fileRevision={viewerEpoch}
-            />
-          </div>
+          {liveSession ? (
+            <div
+              className={
+                editing
+                  ? "space-y-4"
+                  : "pointer-events-none invisible fixed top-0 left-0 -z-10 h-[80vh] w-[min(100%,72rem)] overflow-hidden"
+              }
+              aria-hidden={editing ? undefined : true}
+              inert={editing ? undefined : true}
+            >
+              <PdfCraftHost
+                session={liveSession}
+                pageOrigin={typeof window === "undefined" ? "" : window.location.origin}
+                frameRef={editorFrameRef}
+                onCommitted={() => {
+                  toast.success(PDF_APPLY_SUCCESS);
+                  refreshAfterCommit();
+                }}
+                onFailed={(err) => toast.error(toastForPdfEditCommitFailure(err))}
+              />
+              {editing ? (
+                <PdfEditApplyPanel
+                  session={liveSession}
+                  pending={false}
+                  onSave={() => {
+                    const frame = editorFrameRef.current;
+                    const saved = requestEditorSave(frame?.contentWindow ?? null);
+                    if (!saved) {
+                      frame?.focus();
+                      toast.message(PDF_APPLY_BANNER_HELP);
+                    }
+                  }}
+                  onOpenEditor={() => {
+                    const origin = typeof window === "undefined" ? "" : window.location.origin;
+                    const opened = origin
+                      ? openUrlViaAnchor(pdfcraftEditorUrl(origin, liveSession.sourceFileUrl, "tab"))
+                      : false;
+                    if (!opened) toast.error(PDF_OPEN_FILE_FAILED);
+                  }}
+                  onCancel={clearEditSession}
+                />
+              ) : null}
+            </div>
+          ) : null}
+          {showWordEditor || (editing && liveSession) ? null : wordDoc ? (
+            <div className="rounded-xl bg-surface p-4 text-sm text-muted shadow-[var(--shadow-border)]">
+              L’aperçu PDF n’est pas encore prêt. Éditer rouvre le document.
+            </div>
+          ) : (
+            <div className="max-h-[80vh] overflow-y-auto rounded-xl bg-surface p-3 shadow-[var(--shadow-border)]">
+              <DocumentPages
+                key={`${docId}-${viewerEpoch}`}
+                docId={docId}
+                title={doc.title}
+                svg={doc.thumbnailSvg}
+                fileData={doc.fileData}
+                mimeType={doc.mimeType}
+                fileRevision={viewerEpoch}
+              />
+            </div>
+          )}
         </div>
         <div className="space-y-4">
           <DocumentFicheForm docId={docId} doc={doc} onSaveStatusChange={onSaveStatusChange} />

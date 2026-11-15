@@ -1,6 +1,8 @@
 # Install
 
-Paperrust runs as one application process in front of [pgrust](https://github.com/malisper/pgrust). Docker Compose is the supported way to start both. The example pins pgrust v0.4-beta, the current latest release. pgrust speaks the PostgreSQL wire protocol. The Docker Hub tag `latest` still points at v0.3, so the example does not use it.
+Paperrust runs as one application process in front of [pgrust](https://github.com/malisper/pgrust). Docker Compose is the supported way to start the stack: Paperrust, pgrust, [PdfCraft](https://github.com/storytold/pdfcraft), and [WordCraft](https://github.com/storytold/wordcraft). The example pins pgrust v0.4-beta, the current latest release. pgrust speaks the PostgreSQL wire protocol. The Docker Hub tag `latest` still points at v0.3, so the example does not use it.
+
+PdfCraft web 0.21.1 and WordCraft web 0.18.1 are downloaded when their images build. The checksums are in `packaging/pdfcraft/Dockerfile` and `packaging/wordcraft/Dockerfile`. The editor ports stay on the Compose network. Paperrust proxies them at `/pdfcraft/` and `/wordcraft/`. See [editors.md](editors.md).
 
 ## Requirements
 
@@ -42,7 +44,7 @@ Set at least:
 
 `PAPERRUST_CORS_ORIGINS` is the exact list of browser origins allowed to call the API. Leave it empty when the browser uses the same origin as the API.
 
-Optional variables in `.env.example` cover a custom CA bundle, a first user, Stirling-PDF, Paperless-ngx, self-hosted OCR, and language-model credentials. An empty URL leaves that integration off.
+Optional variables in `.env.example` cover a custom CA bundle, a first user, Stirling-PDF, Paperless-ngx, self-hosted OCR, and language-model credentials. An empty URL leaves that integration off. PdfCraft and WordCraft do not need a URL: Compose sets `PAPERRUST_PDFCRAFT_UPSTREAM=http://pdfcraft` and `PAPERRUST_WORDCRAFT_UPSTREAM=http://wordcraft`. Leave `PAPERRUST_PDFCRAFT_ORIGIN` empty.
 
 `PAPERRUST_DEV=1` widens local behavior. Do not set it when `PAPERRUST_ENV=production`.
 
@@ -56,7 +58,7 @@ From the repository root:
 docker compose -f docker-compose.example.yml up --build
 ```
 
-The example Compose file builds Paperrust from this tree and starts pgrust v0.4-beta. The first build compiles the API and the web interface. Migrations in `migrations/*.sql` run once, on an empty data volume. The database port is not published.
+The example Compose file builds Paperrust from this tree and starts pgrust v0.4-beta, PdfCraft, and WordCraft. The first build compiles the API and the web interface, and downloads the two editor zips. Migrations in `migrations/*.sql` run once, on an empty data volume. The database port is not published. The editor ports are not published.
 
 ## Check
 

@@ -1,52 +1,51 @@
 import { useMutation } from "@tanstack/react-query";
 import { Loader2, Pencil } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { isAuthRequired } from "@/lib/auth/auth-required";
-import { startPdfStirlingEdit } from "@/lib/paperless/actions";
+import { startPdfEdit } from "@/lib/paperless/actions";
 import {
-  STIRLING_CONFIG_CHECKING,
-  STIRLING_EDIT_HINT_BLOCKED,
-  STIRLING_EDIT_LABEL,
-  STIRLING_EDIT_STARTED_NO_FILEURL,
-  STIRLING_SESSION_EXPIRED,
-  configuredStirlingOpenHref,
+  PDF_EDIT_LABEL,
+  PDF_READ_LABEL,
+  PDF_SESSION_EXPIRED,
   documentFileEditTarget,
   errorStatus,
-  isM365Connected,
-  isStirlingSessionExpired,
-  openStirlingTab,
-  parseStirlingEditSession,
-  loadStirlingBaseUrl,
+  isPdfEditSessionExpired,
+  parsePdfEditSession,
+  pdfcraftEditorUrl,
+  pdfEditDisabledReason,
   reasonFromHttpStatus,
-  stirlingConfiguredFrom,
-  stirlingEditDisabledReason,
-  stirlingPublicHref,
-  toastForStirlingEditFailure,
-  toastForStirlingEditStarted,
+  toastForPdfEditFailure,
   type DocumentFileEditTarget,
-  type StirlingEditSession,
-} from "@/lib/paperless/stirling-edit";
+  type PdfEditSession,
+} from "@/lib/paperless/pdfcraft-edit";
 
 type DocumentEditButtonProps = {
   documentId: number;
   mimeType?: string | null;
   filename?: string | null;
   hasFile: boolean;
-  onSessionStarted?: (session: StirlingEditSession) => void;
+  editing?: boolean;
+  sessionOpen?: boolean;
+  onShowReading?: () => void;
+  onShowEditing?: () => void;
+  onSessionStarted?: (session: PdfEditSession) => void;
 };
 
 function EditButtonShell({
   disabled,
   hint,
   pending,
+  pressed,
+  label,
   onClick,
 }: {
   disabled: boolean;
   hint: string | null;
   pending?: boolean;
+  pressed?: boolean;
+  label: string;
   onClick?: () => void;
 }) {
   const button = (
@@ -56,10 +55,11 @@ function EditButtonShell({
       size="sm"
       disabled={disabled || pending}
       onClick={onClick}
-      aria-label={STIRLING_EDIT_LABEL}
+      aria-label={label}
+      aria-pressed={pressed}
     >
       {pending ? <Loader2 className="size-4 animate-spin" /> : <Pencil className="size-4" />}
-      {STIRLING_EDIT_LABEL}
+      {label}
     </Button>
   );
   if (!hint) return button;
@@ -70,96 +70,93 @@ function EditButtonShell({
   );
 }
 
-function onM365Click() {
-  if (isM365Connected()) {
-    /* Office edit is not available yet. */
-    return;
-  }
-}
-
 export function DocumentEditButton({
   documentId,
   mimeType,
   filename,
   hasFile,
+  editing = false,
+  sessionOpen = false,
+  onShowReading,
+  onShowEditing,
   onSessionStarted,
 }: DocumentEditButtonProps) {
   const target: DocumentFileEditTarget = documentFileEditTarget(mimeType, filename);
-  const [stirlingConfigured, setStirlingConfigured] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (target !== "stirling") return;
-    let cancelled = false;
-    void loadStirlingBaseUrl().then((url) => {
-      if (!cancelled) setStirlingConfigured(stirlingConfiguredFrom(url));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [target]);
-  const hint =
-    target === "stirling" && stirlingConfigured === null
-      ? STIRLING_CONFIG_CHECKING
-      : stirlingEditDisabledReason({
-          target,
-          hasFile,
-          stirlingConfigured: stirlingConfigured === false ? false : undefined,
-        });
+  const hint = pdfEditDisabledReason({ target, hasFile });
   const disabled = target === null || hint !== null;
-  const openedRef = useRef(false);
 
-  const stirling = useMutation({
-    mutationFn: () => startPdfStirlingEdit(documentId),
+  const edit = useMutation({
+    mutationFn: () => startPdfEdit(documentId),
     onSuccess: (raw) => {
-      const session = parseStirlingEditSession(raw);
+      const session = parsePdfEditSession(raw);
       if (!session) {
-        toast.error(toastForStirlingEditFailure("not_ready"));
+        toast.error(toastForPdfEditFailure("not_ready"));
         return;
       }
-      if (isStirlingSessionExpired(session)) {
-        toast.error(STIRLING_SESSION_EXPIRED);
+      if (isPdfEditSessionExpired(session)) {
+        toast.error(PDF_SESSION_EXPIRED);
         return;
       }
-      if (openedRef.current) {
-        const href = stirlingPublicHref(session.editorUrl, [session.token, session.sessionId]);
-        toast.success(
-          href
-            ? toastForStirlingEditStarted(session.stirlingUpload, href, false)
-            : STIRLING_EDIT_STARTED_NO_FILEURL,
-        );
+      const pageOrigin = typeof window !== "undefined" ? window.location.origin : "";
+      if (pageOrigin) {
+        const opened = pdfcraftEditorUrl(pageOrigin, session.sourceFileUrl);
+        if (!opened.includes("?file=") || opened.includes("fileUrl")) {
+          toast.error(toastForPdfEditFailure("unavailable"));
+          return;
+        }
       }
       onSessionStarted?.(session);
     },
     onError: (err) => {
       if (isAuthRequired(err)) {
-        toast.error(toastForStirlingEditFailure("auth"));
+        toast.error(toastForPdfEditFailure("auth"));
         return;
       }
-      toast.error(toastForStirlingEditFailure(reasonFromHttpStatus(errorStatus(err))));
+      toast.error(toastForPdfEditFailure(reasonFromHttpStatus(errorStatus(err))));
     },
   });
 
-  const onStirlingClick = () => {
-    if (stirling.isPending) return;
-    const href = configuredStirlingOpenHref();
-    openedRef.current = Boolean(href && openStirlingTab(href));
-    if (!openedRef.current) {
-      toast.error(STIRLING_EDIT_HINT_BLOCKED);
+  const onEditClick = () => {
+    if (edit.isPending) return;
+    if (editing) {
+      onShowReading?.();
+      return;
     }
-    stirling.mutate();
+    if (sessionOpen) {
+      onShowEditing?.();
+      return;
+    }
+    edit.mutate();
   };
 
-  if (target === null) return null;
+  if (target === null || target === "m365") return null;
 
-  if (target === "m365") {
-    return <EditButtonShell disabled={disabled} hint={hint} onClick={onM365Click} />;
+  const label = editing ? PDF_READ_LABEL : PDF_EDIT_LABEL;
+
+  if (target === "wordcraft") {
+    const onWordClick = () => {
+      if (editing) onShowReading?.();
+      else onShowEditing?.();
+    };
+    return (
+      <EditButtonShell
+        disabled={disabled}
+        hint={editing ? null : hint}
+        pressed={editing}
+        label={label}
+        onClick={disabled ? undefined : onWordClick}
+      />
+    );
   }
 
   return (
     <EditButtonShell
       disabled={disabled}
-      hint={hint}
-      pending={stirling.isPending}
-      onClick={disabled ? undefined : onStirlingClick}
+      hint={editing ? null : hint}
+      pending={edit.isPending}
+      pressed={editing}
+      label={label}
+      onClick={disabled ? undefined : onEditClick}
     />
   );
 }

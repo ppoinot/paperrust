@@ -63,6 +63,22 @@ pub fn not_found() -> Response {
         .into_response()
 }
 
+/// PdfCraft edit file/commit — HMAC token is checked in the handler (no cookie).
+pub fn is_pdfcraft_edit_token_path(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/edit/pdfcraft/") else {
+        return false;
+    };
+    let Some((token, action)) = rest.split_once('/') else {
+        return false;
+    };
+    let len = token.len();
+    (16..=256).contains(&len)
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        && matches!(action, "file" | "commit")
+}
+
 /// Stirling edit file/commit — HMAC token is checked in the handler (no cookie).
 pub fn is_stirling_edit_token_path(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("/api/edit/stirling/") else {
@@ -87,7 +103,7 @@ pub fn is_lan_request_host(host: &str) -> bool {
 pub fn is_public_path(path: &str) -> bool {
     let path = path.trim_end_matches("/");
     let path = if path.is_empty() { "/" } else { path };
-    if is_stirling_edit_token_path(path) {
+    if is_stirling_edit_token_path(path) || is_pdfcraft_edit_token_path(path) {
         return true;
     }
     matches!(
@@ -2846,6 +2862,20 @@ https://archive.legacy.test=https://auth.legacy.test",
         assert!(!is_public_path("/api/documents/1/edit/stirling"));
         assert!(!is_public_path("/api/edit/stirling/short/file"));
         assert!(!is_public_path("/api/edit/stirling/abcdefghijklmnop/open"));
+    }
+
+    #[test]
+    fn pdfcraft_token_paths_are_public() {
+        assert!(is_public_path(
+            "/api/edit/pdfcraft/abcdefghijklmnop.sig/file"
+        ));
+        assert!(is_public_path(
+            "/api/edit/pdfcraft/abcdefghijklmnop.sig/commit"
+        ));
+        assert!(!is_public_path("/api/documents/1/edit/pdfcraft"));
+        assert!(!is_public_path("/api/edit/pdfcraft/short/file"));
+        assert!(!is_public_path("/api/edit/pdfcraft/abcdefghijklmnop/open"));
+        assert!(!is_public_path("/pdfcraft/"));
     }
 
     #[test]

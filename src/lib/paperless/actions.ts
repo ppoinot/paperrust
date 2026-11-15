@@ -174,6 +174,49 @@ export async function pullPdfStirlingEdit(
   });
 }
 
+/** Same-origin PdfCraft session. The iframe loads `/pdfcraft/` with the signed file URL. */
+export async function startPdfEdit(documentId: number): Promise<{
+  sessionId: string;
+  token: string;
+  editorUrl: string;
+  sourceFileUrl: string;
+  commitUrl: string;
+  expiresAt: string;
+  filename: string;
+  documentId: number;
+  mimeType: string;
+}> {
+  return apiPost(`/api/documents/${documentId}/edit/pdfcraft`);
+}
+
+/** Cookie session. Multipart field `file` is the PDF PdfCraft exported. */
+export async function commitPdfEdit(
+  documentId: number,
+  file: File | Blob,
+  token?: string,
+  filename?: string,
+): Promise<{ ok: boolean; documentId: number; ocr: { ok?: boolean; error?: string } }> {
+  const form = new FormData();
+  const name =
+    filename?.trim() || (file instanceof File && file.name ? file.name : "document.pdf");
+  form.append("file", file, name);
+  if (token?.trim()) form.append("token", token.trim());
+  return apiForm(`/api/documents/${documentId}/edit/pdfcraft/commit`, form);
+}
+
+/** Cookie session. Multipart field `file` is a Word original or the PDF WordCraft exported. */
+export async function commitWordcraft(
+  documentId: number,
+  file: File | Blob,
+  filename?: string,
+): Promise<{ ok: boolean; kind: "original" | "rendition" | "ignored"; documentId: number }> {
+  const form = new FormData();
+  const name =
+    filename?.trim() || (file instanceof File && file.name ? file.name : "document.docx");
+  form.append("file", file, name);
+  return apiForm(`/api/documents/${documentId}/wordcraft/commit`, form);
+}
+
 export async function createNamedTag(name: string): Promise<Tag> {
   const raw = await apiPost<Tag | Tag[]>("/api/tags", { name });
   const tag = entityFromPost(raw, name);
