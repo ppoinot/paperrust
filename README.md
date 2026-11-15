@@ -2,6 +2,8 @@
 
 Paperrust is a self-hosted document archive. You upload originals, read them in the browser, and keep correspondents, tags, types, and custom fields on each document. A Rust API stores the archive in [pgrust](https://github.com/malisper/pgrust) and serves the web interface from the same process.
 
+The download is one stack: Paperrust, pgrust, [PdfCraft](https://github.com/storytold/pdfcraft), and [WordCraft](https://github.com/storytold/wordcraft). PDF files open in PdfCraft. Word files open in WordCraft. Both editors are served by Paperrust on the same origin, and saving writes the file back into the archive.
+
 The interface is in French.
 
 ## Features
@@ -26,7 +28,8 @@ The browser app can be installed (web app manifest, service worker that does not
 
 ### Edit and bring documents in
 
-- Optional hand-off to Stirling-PDF. The editor tab opens on the editor origin only
+- PDF files open in PdfCraft. Word files (DOCX and the other formats WordCraft rewrites) open in WordCraft. Saving a PDF replaces the original and runs OCR again. Saving a Word file keeps the word-processor original and stores the exported PDF as the preview
+- Stirling-PDF remains available as an optional integration. The document button uses PdfCraft and WordCraft
 - Optional import from a Paperless-ngx instance
 - Paperless-ngx compatible upload, `POST /api/documents/post_document/` ([docs/quickscan-ngx.md](docs/quickscan-ngx.md))
 - iOS Shortcut ingest, `POST /api/v1/ingest` ([docs/ios-shortcut.md](docs/ios-shortcut.md))
@@ -52,7 +55,7 @@ Allowed redirects are the Grok and Cursor connector callbacks, and HTTP loopback
 
 ## Install
 
-Docker Compose is the supported install. It builds Paperrust from this repository and starts pgrust.
+Docker Compose is the supported install. It builds Paperrust from this repository and starts pgrust, PdfCraft, and WordCraft. PdfCraft and WordCraft are official web builds, downloaded and checksummed when their images build. Their ports are not published.
 
 ```bash
 cp .env.example .env
@@ -74,6 +77,7 @@ The groups you will set:
 - **Database.** `DATABASE_URL`, a libpq URL for pgrust (use a generated password, not a sample)
 - **HTTP.** `PAPERRUST_BIND`, `PAPERRUST_ENV`, `PAPERRUST_PUBLIC_URLS` (HTTPS origins), `PAPERRUST_CORS_ORIGINS`
 - **Sign-in.** `SESSION_SECRET` set to `<generate: openssl rand -hex 32>`, plus `PAPERRUST_OIDC_ISSUER`, `PAPERRUST_OIDC_CLIENT_ID`, `PAPERRUST_OIDC_CLIENT_SECRET`
+- **Editors.** `PAPERRUST_PDFCRAFT_UPSTREAM` and `PAPERRUST_WORDCRAFT_UPSTREAM` (the Compose file sets `http://pdfcraft` and `http://wordcraft`). Leave `PAPERRUST_PDFCRAFT_ORIGIN` empty: the editors are same-origin iframes
 - **Optional integrations.** Stirling-PDF URLs, a Paperless-ngx host allowlist, a self-hosted OCR host allowlist, and provider credentials for OCR
 
 Leave an optional URL empty to keep that integration off. Do not put secrets in the Compose file; keep them in `.env` or a secret store.

@@ -1,4 +1,4 @@
-# Local pgrust + Paperrust built from this tree.
+# Paperrust with pgrust, PdfCraft, and WordCraft.
 #
 #   docker compose -f docker-compose.example.yml up --build
 #
@@ -8,6 +8,10 @@
 # pgrust v0.4-beta is the current latest release. It speaks the PostgreSQL
 # wire protocol. The Docker Hub tag "latest" still points at v0.3, so this
 # file pins v0.4-beta. Migrations run once, on a fresh data volume.
+#
+# PdfCraft and WordCraft are official web builds, downloaded when their
+# images build. Their ports stay on the Compose network. Paperrust proxies
+# them at /pdfcraft/ and /wordcraft/.
 
 services:
   pgrust:
@@ -26,12 +30,34 @@ services:
       timeout: 5s
       retries: 30
 
+  pdfcraft:
+    build:
+      context: ./packaging/pdfcraft
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  wordcraft:
+    build:
+      context: ./packaging/wordcraft
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   paperrust:
     build:
       context: .
       dockerfile: Containerfile
     depends_on:
       pgrust:
+        condition: service_healthy
+      pdfcraft:
+        condition: service_healthy
+      wordcraft:
         condition: service_healthy
     ports:
       - "8788:8788"
@@ -46,6 +72,8 @@ services:
       PAPERRUST_BOOTSTRAP_EMAIL: admin@example.invalid
       PAPERRUST_BOOTSTRAP_NAME: Admin
       PAPERRUST_BOOTSTRAP_SUBJECT: bootstrap:admin
+      PAPERRUST_PDFCRAFT_UPSTREAM: http://pdfcraft
+      PAPERRUST_WORDCRAFT_UPSTREAM: http://wordcraft
 
 volumes:
   pgrust-data:

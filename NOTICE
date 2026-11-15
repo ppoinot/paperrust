@@ -62,3 +62,35 @@ public/pdfjs/standard_fonts/ (FoxitFixed, FoxitSerif, FoxitSymbol,
 FoxitDingbats, and their bold and italic variants) are covered by the same
 PDFium Authors terms. License text:
 public/pdfjs/standard_fonts/LICENSE_FOXIT
+
+PdfCraft web
+------------
+
+The Compose image `pdfcraft` downloads the official web build at image build
+time. The zip is not vendored into this repository and is not relicensed
+under the AGPL.
+
+  pdfcraft-web 0.21.1
+  https://github.com/storytold/pdfcraft/releases/download/v0.21.1/pdfcraft-web-0.21.1.zip
+  License: MIT OR Apache-2.0
+  The zip's LICENSE-MIT, LICENSE-APACHE, and NOTICE ship inside the image.
+
+The same zip includes text-detection and text-recognition ONNX models
+(Robert Knight, ocrs-models, trained on HierText).
+
+  License: CC-BY-SA-4.0
+  https://creativecommons.org/licenses/by-sa/4.0/legalcode.txt
+  Attribution text: models/ATTRIBUTION.txt inside the zip
+
+WordCraft web
+-------------
+
+The Compose image `wordcraft` downloads the official web build at image build
+time. The zip is not vendored into this repository and is not relicensed
+under the AGPL.
+
+  wordcraft-web 0.18.1
+  https://github.com/storytold/wordcraft/releases/download/v0.18.1/wordcraft-web-0.18.1.zip
+  License: MIT OR Apache-2.0
+  The zip's LICENSE-MIT, LICENSE-APACHE, NOTICE, and OFL font texts ship
+  inside the image.
